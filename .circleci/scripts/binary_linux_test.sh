@@ -72,7 +72,7 @@ if [[ "$PACKAGE_TYPE" != libtorch ]]; then
       pip install "\$pkg_no_python" "\$pkg_torch" --index-url "https://download.pytorch.org/whl/\${CHANNEL}/${DESIRED_CUDA}_pypi_pkg"
       retry pip install -q numpy protobuf typing-extensions
     else
-      pip install "\$pkg" --index-url "https://download.pytorch.org/whl/\${CHANNEL}/${DESIRED_CUDA}"
+      pip install "\$pkg" --extra-index-url "https://download.pytorch.org/whl/\${CHANNEL}/${DESIRED_CUDA}"
       retry pip install -q numpy protobuf typing-extensions
     fi
   else
