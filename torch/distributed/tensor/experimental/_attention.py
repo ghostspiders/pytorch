@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
 from enum import auto, Enum
+from functools import lru_cache
 from typing import Any, Callable, Optional, Protocol, Union
 
 import torch
@@ -16,9 +17,18 @@ import torch.distributed as dist
 import torch.distributed._functional_collectives as ft_c
 import torch.nn.functional as F
 from torch import nn
+from torch._higher_order_ops.flex_attention import flex_attention as flex_attention_hop
+from torch._ops import TorchDispatchMode
+from torch._prims_common import DeviceLikeType
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import distribute_module, DTensor, Replicate, Shard
 from torch.distributed.tensor.parallel.style import ParallelStyle
+from torch.nn.attention.flex_attention import (
+    _identity,
+    _mask_mod_signature,
+    BlockMask,
+    create_block_mask,
+)
 from torch.overrides import TorchFunctionMode
 
 
@@ -60,6 +70,171 @@ class _ContextParallelOptions:
 
 
 _cp_options = _ContextParallelOptions()
+
+
+class _LoadBalancer(ABC):
+    @classmethod
+    @abstractmethod
+    def shard(
+        cls, buffer: torch.Tensor, mesh: DeviceMesh, seq_dim: int
+    ) -> torch.Tensor: ...
+
+    @classmethod
+    @abstractmethod
+    def unshard(
+        cls, buffer: torch.Tensor, mesh: DeviceMesh, seq_dim: int
+    ) -> torch.Tensor: ...
+
+
+class _SequentialSharder(_LoadBalancer):
+    """
+    This load balancer chunks the buffer into cp_world_size and rank0 gets
+    0th shard, rank1 gets 1st shard, ...
+    So this doesn't have any load balancing effect when using the causal masking.
+    """
+
+    @classmethod
+    def shard(
+        cls, buffer: torch.Tensor, mesh: DeviceMesh, seq_dim: int
+    ) -> torch.Tensor:
+        assert buffer.size()[seq_dim] % mesh.size() == 0
+        return buffer.chunk(mesh.size(), dim=seq_dim)[mesh.get_local_rank()]
+
+    @classmethod
+    def unshard(
+        cls, buffer: torch.Tensor, mesh: DeviceMesh, seq_dim: int
+    ) -> torch.Tensor:
+        buffer = buffer.contiguous()
+        all_buffers = [torch.empty_like(buffer) for _ in range(mesh.size())]
+        ft_c.all_gather_inplace(all_buffers, buffer, mesh)
+        return torch.cat(all_buffers, dim=seq_dim)
+
+
+class _RoundRobinLoadBalancer(_LoadBalancer):
+    """
+    This load balancer chunk the buffer into cp_world_size * ROUND_ROBIN_CYCLE
+    shards, and uses a round robin approach to achieve load balancing.
+    Since ROUND_ROBIN_CYCLE being 2 will achieve perfect load balancing for
+    causal masking, we assume ROUND_ROBIN_CYCLE is always 2 to simplify the
+    implementation.
+    """
+
+    ROUND_ROBIN_CYCLE = 2
+
+    @classmethod
+    def shard(
+        cls, buffer: torch.Tensor, mesh: DeviceMesh, seq_dim: int
+    ) -> torch.Tensor:
+        assert cls.ROUND_ROBIN_CYCLE == 2, (
+            "The current implementation only works if ROUND_ROBIN_CYCLE is 2 "
+            f"but got {cls.ROUND_ROBIN_CYCLE}"
+        )
+        cp_world_size = mesh.size()
+        cp_rank = mesh.get_local_rank()
+        assert buffer.size()[seq_dim] % (cp_world_size * 2) == 0
+        chunks = buffer.chunk(cp_world_size * 2, dim=seq_dim)
+        return torch.cat(
+            (chunks[cp_rank], chunks[cp_world_size * 2 - cp_rank - 1]),
+            dim=seq_dim,
+        )
+
+    @classmethod
+    def unshard(
+        cls, buffer: torch.Tensor, mesh: DeviceMesh, seq_dim: int
+    ) -> torch.Tensor:
+        assert cls.ROUND_ROBIN_CYCLE == 2, (
+            "The current implementation only works if ROUND_ROBIN_CYCLE is 2 "
+            f"but got {cls.ROUND_ROBIN_CYCLE}"
+        )
+        buffer = buffer.contiguous()
+        cp_world_size = mesh.size()
+
+        all_buffers = [torch.empty_like(buffer) for _ in range(cp_world_size)]
+        ft_c.all_gather_inplace(all_buffers, buffer, mesh)
+        sliced_buffers = [sb for b in all_buffers for sb in b.chunk(2, dim=seq_dim)]
+        ordered_buffers = list(sliced_buffers)
+        for i, b in enumerate(sliced_buffers):
+            if i % 2 == 0:
+                ordered_buffers[i // 2] = b
+            else:
+                ordered_buffers[cp_world_size * 2 - (i // 2) - 1] = b
+        return torch.cat(ordered_buffers, dim=seq_dim)
+
+
+# TODO: merge with class `_LoadBalancer`
+class FlexAttentionSharder(ABC):
+    @abstractmethod
+    def shard(
+        self,
+        tensor: torch.Tensor,
+        num_chunks: int,
+        shard_dim: int,
+        **kwargs: dict[str, Any],
+    ) -> list[torch.Tensor]: ...
+
+    @abstractmethod
+    def unshard(
+        self, shards: list[torch.Tensor], shard_dim: int, **kwargs: dict[str, Any]
+    ) -> torch.Tensor: ...
+
+    @abstractmethod
+    @lru_cache  # noqa: B019
+    def gen_block_sharding_map(
+        self, num_chunks: int, block_mask: BlockMask, **kwargs: dict[str, Any]
+    ) -> torch.Tensor: ...
+
+
+class FlexAttentionContiguousSharder(FlexAttentionSharder):
+    def shard(
+        self,
+        tensor: torch.Tensor,
+        num_chunks: int,
+        shard_dim: int,
+        **kwargs: dict[str, Any],
+    ) -> list[torch.Tensor]:
+        return list(tensor.chunk(num_chunks, dim=shard_dim))
+
+    def unshard(
+        self, shards: list[torch.Tensor], shard_dim: int, **kwargs: dict[str, Any]
+    ) -> torch.Tensor:
+        return torch.cat(shards, dim=shard_dim)
+
+    @lru_cache  # noqa: B019
+    def gen_block_sharding_map(
+        self, num_chunks: int, block_mask: BlockMask, **kwargs: dict[str, Any]
+    ) -> torch.Tensor:
+        block_mask_tuple = block_mask.as_tuple()
+        assert len(block_mask_tuple) == 13
+
+        # check Q_LEN == KV_LEN because we only support self-attention for now
+        Q_LEN: int = block_mask_tuple[0]
+        KV_LEN: int = block_mask_tuple[1]
+        assert Q_LEN == KV_LEN, (
+            f"{self.__class__.__name__}.gen_block_sharding_map only supports Q_LEN == KV_LEN"
+            f" but got Q_LEN={Q_LEN} and KV_LEN={KV_LEN}"
+        )
+
+        # check Q_BLOCK_SIZE == KV_BLOCK_SIZE because this should alway be true if Q_LEN == KV_LEN
+        Q_BLOCK_SIZE: int = block_mask_tuple[-3]
+        KV_BLOCK_SIZE: int = block_mask_tuple[-2]
+        assert Q_BLOCK_SIZE == KV_BLOCK_SIZE, (
+            f"{self.__class__.__name__}.gen_block_sharding_map requires Q_BLOCK_SIZE == KV_BLOCK_SIZE"
+            f" but got Q_BLOCK_SIZE={Q_BLOCK_SIZE}, KV_BLOCK_SIZE={KV_BLOCK_SIZE}."
+        )
+
+        # we only support the simplest sharding case: each rank has the same number of blocks and each block is full
+        assert Q_LEN % num_chunks == 0, (
+            f"{self.__class__.__name__}.gen_block_sharding_map only supports even sharding"
+            f" but got Q_LEN={Q_LEN} and num_chunks={num_chunks}"
+        )
+        chunk_size = Q_LEN // num_chunks
+
+        assert chunk_size % Q_BLOCK_SIZE == 0, (
+            f"{self.__class__.__name__}.gen_block_sharding_map does not support partial block"
+            f" but got chunk_size={chunk_size}, BLOCK_SIZE={Q_BLOCK_SIZE}."
+        )
+        num_blocks_in_chunk = chunk_size // Q_BLOCK_SIZE
+        return torch.arange(Q_LEN // Q_BLOCK_SIZE).view(num_chunks, num_blocks_in_chunk)
 
 
 def _is_causal_behavior(
@@ -1146,7 +1321,12 @@ class _AttentionContextParallel(ParallelStyle):
 
 
 @contextlib.contextmanager
-def _context_parallel(seq_dim: int, mesh: DeviceMesh) -> Generator[None, None, None]:
+def _context_parallel(
+    seq_dim: int,
+    mesh: DeviceMesh,
+    block_mask: Optional[BlockMask] = None,
+    sharder: Optional[FlexAttentionSharder] = None,
+) -> Generator[None, None, None]:
     """Replace SDPA with the CP-wrapped version and enable DTensor CP dispatcher."""
 
     def attention_input_fn(
@@ -1229,110 +1409,32 @@ def _context_parallel(seq_dim: int, mesh: DeviceMesh) -> Generator[None, None, N
             with _enable_cp_dispatcher():
                 yield
     else:
-        raise NotImplementedError("torch dispatch mode is not supported yet.")
-
-
-class _LoadBalancer(ABC):
-    @classmethod
-    @abstractmethod
-    def shard(
-        cls, buffer: torch.Tensor, mesh: DeviceMesh, seq_dim: int
-    ) -> torch.Tensor: ...
-
-    @classmethod
-    @abstractmethod
-    def unshard(
-        cls, buffer: torch.Tensor, mesh: DeviceMesh, seq_dim: int
-    ) -> torch.Tensor: ...
-
-
-class _SequentialSharder(_LoadBalancer):
-    """
-    This load balancer chunks the buffer into cp_world_size and rank0 gets
-    0th shard, rank1 gets 1st shard, ...
-    So this doesn't have any load balancing effect when using the causal masking.
-    """
-
-    @classmethod
-    def shard(
-        cls, buffer: torch.Tensor, mesh: DeviceMesh, seq_dim: int
-    ) -> torch.Tensor:
-        assert buffer.size()[seq_dim] % mesh.size() == 0
-        return buffer.chunk(mesh.size(), dim=seq_dim)[mesh.get_local_rank()]
-
-    @classmethod
-    def unshard(
-        cls, buffer: torch.Tensor, mesh: DeviceMesh, seq_dim: int
-    ) -> torch.Tensor:
-        buffer = buffer.contiguous()
-        all_buffers = [torch.empty_like(buffer) for _ in range(mesh.size())]
-        ft_c.all_gather_inplace(all_buffers, buffer, mesh)
-        return torch.cat(all_buffers, dim=seq_dim)
-
-
-class _RoundRobinLoadBalancer(_LoadBalancer):
-    """
-    This load balancer chunk the buffer into cp_world_size * ROUND_ROBIN_CYCLE
-    shards, and uses a round robin approach to achieve load balancing.
-    Since ROUND_ROBIN_CYCLE being 2 will achieve perfect load balancing for
-    causal masking, we assume ROUND_ROBIN_CYCLE is always 2 to simplify the
-    implementation.
-    """
-
-    ROUND_ROBIN_CYCLE = 2
-
-    @classmethod
-    def shard(
-        cls, buffer: torch.Tensor, mesh: DeviceMesh, seq_dim: int
-    ) -> torch.Tensor:
-        assert cls.ROUND_ROBIN_CYCLE == 2, (
-            "The current implementation only works if ROUND_ROBIN_CYCLE is 2."
-        )
-        cp_world_size = mesh.size()
-        cp_rank = mesh.get_local_rank()
-        assert buffer.size()[seq_dim] % (cp_world_size * 2) == 0
-        chunks = buffer.chunk(cp_world_size * 2, dim=seq_dim)
-        return torch.cat(
-            (chunks[cp_rank], chunks[cp_world_size * 2 - cp_rank - 1]),
-            dim=seq_dim,
-        )
-
-    @classmethod
-    def unshard(
-        cls, buffer: torch.Tensor, mesh: DeviceMesh, seq_dim: int
-    ) -> torch.Tensor:
-        assert cls.ROUND_ROBIN_CYCLE == 2, (
-            "The current implementation only works if ROUND_ROBIN_CYCLE is 2."
-        )
-        buffer = buffer.contiguous()
-        cp_world_size = mesh.size()
-
-        all_buffers = [torch.empty_like(buffer) for _ in range(cp_world_size)]
-        ft_c.all_gather_inplace(all_buffers, buffer, mesh)
-        sliced_buffers = [sb for b in all_buffers for sb in b.chunk(2, dim=seq_dim)]
-        ordered_buffers = list(sliced_buffers)
-        for i, b in enumerate(sliced_buffers):
-            if i % 2 == 0:
-                ordered_buffers[i // 2] = b
-            else:
-                ordered_buffers[cp_world_size * 2 - (i // 2) - 1] = b
-        return torch.cat(ordered_buffers, dim=seq_dim)
+        with ContextParallelMode(mesh, block_mask, sharder):
+            with _enable_cp_dispatcher():
+                yield
 
 
 def _context_parallel_buffers(
     mesh: DeviceMesh,
     buffers: list[torch.Tensor],
     buffer_seq_dims: list[int],
+    sharder: Optional[FlexAttentionSharder] = None,
 ) -> list[torch.Tensor]:
     """Shard the buffers along the sequence dimensions according to CP rules."""
     new_buffers = []
-    sharder = (
-        _RoundRobinLoadBalancer
-        if _cp_options.enable_load_balance
-        else _SequentialSharder
-    )
-    for buffer, seq_dim in zip(buffers, buffer_seq_dims):
-        new_buffers.append(sharder.shard(buffer, mesh, seq_dim))
+    if sharder is None:
+        sdpa_sharder = (
+            _RoundRobinLoadBalancer
+            if _cp_options.enable_load_balance
+            else _SequentialSharder
+        )
+        for buffer, seq_dim in zip(buffers, buffer_seq_dims):
+            new_buffers.append(sdpa_sharder.shard(buffer, mesh, seq_dim))
+    else:
+        for buffer, seq_dim in zip(buffers, buffer_seq_dims):
+            new_buffers.append(
+                sharder.shard(buffer, mesh.size(), seq_dim)[mesh.get_local_rank()]
+            )
 
     return new_buffers
 
@@ -1345,6 +1447,8 @@ def context_parallel(
     buffers: Optional[list[torch.Tensor]] = None,
     buffer_seq_dims: Optional[list[int]] = None,
     no_restore_buffers: Optional[set[torch.Tensor]] = None,
+    block_mask: Optional[BlockMask] = None,
+    sharder: Optional[FlexAttentionSharder] = None,
 ) -> Generator[None, None, None]:
     """
 
@@ -1390,13 +1494,15 @@ def context_parallel(
             raise ValueError("`no_restore_buffers` must be a subset of `buffers`.")
 
     original_buffers = [None if b in no_restore_buffers else b.clone() for b in buffers]
-    chunks = _context_parallel_buffers(mesh, buffers, buffer_seq_dims)
+    chunks = _context_parallel_buffers(mesh, buffers, buffer_seq_dims, sharder)
     for buffer, chunk in zip(buffers, chunks):
         chunk = chunk.clone()
         buffer.resize_(chunk.shape)
         buffer.copy_(chunk)
 
-    with _context_parallel(seq_dim=2, mesh=mesh):
+    with _context_parallel(
+        seq_dim=2, mesh=mesh, block_mask=block_mask, sharder=sharder
+    ):
         yield
 
     for buffer, original_buffer in zip(buffers, original_buffers):
@@ -1410,6 +1516,7 @@ def context_parallel_unshard(
     mesh: DeviceMesh,
     buffers: list[torch.Tensor],
     seq_dims: list[int],
+    sharder: Optional[FlexAttentionSharder] = None,
 ) -> list[torch.Tensor]:
     """
     Unshard the tensors (e.g., output) that are sharded due to context parallelism.
@@ -1423,12 +1530,23 @@ def context_parallel_unshard(
     Returns:
         List[torch.Tensor]: the unsharded buffers.
     """
-    sharder = (
-        _RoundRobinLoadBalancer
-        if _cp_options.enable_load_balance
-        else _SequentialSharder
-    )
-    return [sharder.unshard(b, mesh, dim) for b, dim in zip(buffers, seq_dims)]
+    if sharder is None:
+        sdpa_sharder = (
+            _RoundRobinLoadBalancer
+            if _cp_options.enable_load_balance
+            else _SequentialSharder
+        )
+        return [sdpa_sharder.unshard(b, mesh, dim) for b, dim in zip(buffers, seq_dims)]
+    else:
+        new_buffers = []
+        for buffer, seq_dim in zip(buffers, seq_dims):
+            buffer = buffer.contiguous()
+            cp_world_size = mesh.size()
+            all_buffers = [torch.empty_like(buffer) for _ in range(cp_world_size)]
+            ft_c.all_gather_inplace(all_buffers, buffer, mesh)
+            new_buffers.append(sharder.unshard(all_buffers, seq_dim))
+
+        return new_buffers
 
 
 def set_rotate_method(rotate_method: str) -> None:
@@ -1456,3 +1574,162 @@ def set_rotate_method(rotate_method: str) -> None:
             "Context Parallel does not support "
             f"using {rotate_method} for kv shards rotation"
         )
+
+
+class ContextParallelMode(TorchDispatchMode):
+    def __init__(
+        self,
+        device_mesh: DeviceMesh,
+        block_mask: Optional[BlockMask] = None,
+        sharder: Optional[FlexAttentionSharder] = None,
+    ):
+        super().__init__()
+        self._device_mesh = device_mesh
+
+        # if user has not specified the flex_attention components
+        if block_mask is None or sharder is None:
+            self._cp_block_mask = None
+            self._sharder = None
+            self._sharding_map = torch.empty(0)
+            return
+
+        block_mask_tuple = block_mask.as_tuple()
+        assert len(block_mask_tuple) == 13
+        Q_LEN: int = block_mask_tuple[0]
+        KV_LEN: int = block_mask_tuple[1]
+
+        mask_mod: _mask_mod_signature = block_mask_tuple[-1]
+        Q_BLOCK_SIZE: int = block_mask_tuple[-3]
+        KV_BLOCK_SIZE: int = block_mask_tuple[-2]
+
+        # TODO: support other KV block sizes
+        assert Q_BLOCK_SIZE == KV_BLOCK_SIZE
+
+        # resolve CP device mesh info
+        assert device_mesh.ndim == 1
+        cp_rank = device_mesh.get_local_rank()
+        cp_group_size = device_mesh.size()
+        device_type = device_mesh.device_type
+
+        # the sharding function is configurable
+        sharding_map = sharder.gen_block_sharding_map(cp_group_size, block_mask).to(
+            device_type
+        )
+
+        # rewrite block_mask
+        cp_mask_mod = _rewrite_mask_mod_for_cp(
+            mask_mod, cp_rank, Q_BLOCK_SIZE, sharding_map
+        )
+        cp_block_mask = _create_block_mask_cached(
+            cp_mask_mod,
+            B=1,
+            H=1,
+            M=Q_LEN // cp_group_size,
+            N=KV_LEN,
+            device=device_type,
+            BLOCK_SIZE=(Q_BLOCK_SIZE, KV_BLOCK_SIZE),
+        )
+
+        self._sharder = sharder
+        self._sharding_map = sharding_map
+        self._cp_block_mask = cp_block_mask
+
+    def __torch_dispatch__(
+        self,
+        func: Callable,
+        types: Any,
+        args: tuple[Any, ...] = (),
+        kwargs: Optional[dict[str, Any]] = None,
+    ) -> Any:
+        kwargs = kwargs or {}
+        return func(*args, **kwargs)
+
+
+# NOTE: functools.lru_cache may cause memory leak
+@lru_cache  # noqa: B019
+def _create_block_mask_cached(
+    mask_mod: _mask_mod_signature,
+    B: int,
+    H: int,
+    M: int,
+    N: int,
+    device: DeviceLikeType,
+    BLOCK_SIZE: Union[int, tuple[int, int]],
+) -> BlockMask:
+    block_mask = create_block_mask(
+        mask_mod, B, H, M, N, device=device, BLOCK_SIZE=BLOCK_SIZE
+    )
+    return block_mask
+
+
+def _rewrite_mask_mod_for_cp(
+    mask_mod: _mask_mod_signature,
+    rank: int,
+    block_size: int,
+    sharding_map: torch.Tensor,
+) -> _mask_mod_signature:
+    def local_q_idx_to_q_idx(local_q_idx: torch.Tensor) -> torch.Tensor:
+        # calculate local block_idx and block_offset
+        local_blk_idx, local_blk_offset = (
+            local_q_idx // block_size,
+            local_q_idx % block_size,
+        )
+        assert rank < sharding_map.size(0)
+        blk_idx = sharding_map[rank][local_blk_idx]
+        return blk_idx * block_size + local_blk_offset
+
+    return lambda b, h, q_idx, kv_idx: mask_mod(
+        b, h, local_q_idx_to_q_idx(q_idx), kv_idx
+    )
+
+
+@flex_attention_hop.py_impl(ContextParallelMode)
+def cp_flex_attention_dispatch_mode(
+    mode: ContextParallelMode,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    score_mod: Callable,
+    block_mask: tuple,
+    scale: float,
+    kernel_options: dict[str, Any],
+    score_mod_other_buffers: tuple = (),
+    mask_mod_other_buffers: tuple = (),
+) -> tuple[torch.Tensor, torch.Tensor]:
+    cp_block_mask = mode._cp_block_mask
+    assert cp_block_mask is not None, (
+        "flex_attention is called but cp_block_mask is not initialized. "
+        "Please pass the `block_mask` argument to `context_parallel`."
+    )
+
+    assert score_mod == _identity, (
+        "Context-parallel flex_attention only support `_identity` score_mod "
+        f"but got {score_mod}"
+    )
+
+    sharding = Shard(2)
+    k_dist = DTensor.from_local(key, mode._device_mesh, [sharding])
+    v_dist = DTensor.from_local(value, mode._device_mesh, [sharding])
+    k_global = k_dist.full_tensor()
+    v_global = v_dist.full_tensor()
+
+    # TODO: add kv reorder
+    sharding_map = mode._sharding_map
+    assert sharding_map is not None, (
+        "flex_attention is called but sharding_map is not initialized. "
+        "Please pass the `sharder` argument to `context_parallel`."
+    )
+
+    out, lse = flex_attention_hop(
+        query,
+        k_global,
+        v_global,
+        score_mod=score_mod,  # TODO: rewrite score_mod for cp
+        block_mask=cp_block_mask.as_tuple(),
+        scale=scale,
+        kernel_options=kernel_options,
+        score_mod_other_buffers=score_mod_other_buffers,
+        mask_mod_other_buffers=mask_mod_other_buffers,
+    )
+
+    return out, lse
