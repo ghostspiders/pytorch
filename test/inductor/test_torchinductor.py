@@ -30,6 +30,7 @@ import torch
 import torch._dynamo.config as dynamo_config
 import torch._inductor.aoti_eager
 import torch.nn as nn
+from torch._C._dynamo.guards import assert_size_stride, assert_alignment
 from torch._dispatch.python import enable_python_dispatcher
 from torch._dynamo.debug_utils import aot_graph_input_parser
 from torch._dynamo.device_interface import get_interface_for_device
@@ -42,7 +43,6 @@ from torch._dynamo.testing import (
     skipIfPy312,
 )
 from torch._dynamo.utils import ifdynstaticdefault
-from torch._C._dynamo.guards import assert_size_stride, assert_alignment
 from torch._guards import CompileContext, CompileId
 from torch._inductor import lowering
 from torch._inductor.aoti_eager import (
@@ -11851,7 +11851,7 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
         )
 
     @config.patch(implicit_fallbacks=True)
-    def test_generated_code_has_size_stride_assert(self):        
+    def test_generated_code_has_size_stride_assert(self): 
         def foo(x):
             return 3 * x
 
@@ -11867,11 +11867,16 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
 
         a = torch.randn((16, 32))
 
-        _, code = run_and_get_code(torch.compile(fn), a,)
-        FileCheck().check("assert_size_stride(buf2, (16, 32), (32, 1), 'torch.ops.test.foo.default')").run(code[0])
+        _, code = run_and_get_code(
+            torch.compile(fn), 
+            a,
+        )
+        FileCheck().check(
+            "assert_size_stride(buf2, (16, 32), (32, 1), 'torch.ops.test.foo.default')"
+        ).run(code[0])
         
     @config.patch(implicit_fallbacks=True)
-    def test_generated_code_has_alignment_assert(self):        
+    def test_generated_code_has_alignment_assert(self):
         def foo(x):
             return 3 * x
 
@@ -11887,8 +11892,13 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
 
         a = torch.randn((16, 32))
 
-        _, code = run_and_get_code(torch.compile(fn), a,)
-        FileCheck().check("assert_alignment(buf2, 16, 'torch.ops.test.foo.default')").run(code[0])
+        _, code = run_and_get_code(
+            torch.compile(fn), 
+            a,
+        )
+        FileCheck().check(
+            "assert_alignment(buf2, 16, 'torch.ops.test.foo.default')"
+        ).run(code[0])
 
     def test_assert_size_stride_op_name_pass(self):
         tensor = torch.empty((16, 32))
