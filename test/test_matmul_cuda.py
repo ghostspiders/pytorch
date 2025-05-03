@@ -1474,6 +1474,41 @@ class TestFP8Matmul(TestCase):
             sqnr = compute_error(C_ref, C)
             assert sqnr.item() > approx_match_sqnr_target
 
+    @unittest.skipIf(not PLATFORM_SUPPORTS_MX_GEMM, mx_skip_msg)
+    def test_mx_fp8_bias(self, device):
+        M, K, N = 128, 32, 128
+        BLOCK_SIZE = 32
+        device = "cuda"
+        A_ref = torch.eye(M, device=device, dtype=torch.bfloat16)
+        B_ref = torch.eye(N, device=device, dtype=torch.bfloat16)
+        bias = torch.zeros(N, device=device, dtype=torch.bfloat16)
+        bias[0] = 1.0
+
+        A = A_ref.to(torch.float8_e4m3fn)
+        B = B_ref.to(torch.float8_e4m3fn)
+        A_scale = torch.full((M, ceil_div(K, BLOCK_SIZE)), 1.0, device=device, dtype=torch.float8_e8m0fnu)
+        B_scale = torch.full((N, ceil_div(K, BLOCK_SIZE)), 1.0, device=device, dtype=torch.float8_e8m0fnu)
+
+        C_ref = (A_ref @ B_ref.t()) + bias
+
+        # convert to swizzled format
+        A_scale = to_blocked(A_scale)
+        B_scale = to_blocked(B_scale)
+
+        C = torch._scaled_mm(
+            A,
+            B.t(),
+            A_scale,
+            B_scale,
+            out_dtype=torch.bfloat16,
+            use_fast_accum=False,
+            bias=bias
+        )
+        print(C_ref)
+        print(C)
+        torch.testing.assert_close(C, C_ref, atol=0, rtol=0)
+
+
     @unittest.skipIf(not PLATFORM_SUPPORTS_FP8 or IS_WINDOWS, f8_msg)
     @parametrize("recipe", ["mxfp8", "nvfp4"])
     def test_blockwise_mxfp8_nvfp4_error_messages(self, device, recipe) -> None:
@@ -1859,7 +1894,7 @@ class TestMixedDtypesLinearCuda(TestCase):
 
 instantiate_device_type_tests(TestMatmulCuda, globals(), except_for="cpu")
 instantiate_device_type_tests(TestMixedDtypesLinearCuda, globals(), except_for="cpu")
-instantiate_device_type_tests(TestFP8Matmul, globals())
+instantiate_device_type_tests(TestFP8Matmul, globals(), except_for="cpu")
 
 if __name__ == '__main__':
     TestCase._default_dtype_check_enabled = True
