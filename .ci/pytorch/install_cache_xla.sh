@@ -35,3 +35,5 @@ write_sccache_stub gcc
 write_sccache_stub g++
 write_sccache_stub clang
 write_sccache_stub clang++
+
+sccache --start-server
