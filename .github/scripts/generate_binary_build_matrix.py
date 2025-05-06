@@ -98,6 +98,7 @@ PYTORCH_EXTRA_INSTALL_REQUIREMENTS = {
         "onemkl-sycl-blas==2025.1.0 | "
         "onemkl-sycl-dft==2025.1.0 | "
         "onemkl-sycl-lapack==2025.1.0 | "
+        "onemkl-sycl-rng==2025.1.0 | "
         "onemkl-sycl-sparse==2025.1.0 | "
         "dpcpp-cpp-rt==2025.1.1 | "
         "intel-opencl-rt==2025.1.1 | "
