@@ -339,7 +339,7 @@ else
     else
       python setup.py clean
       if [[ "$BUILD_ENVIRONMENT" == *xla* ]]; then
-        source .ci/pytorch/install_cache_xla.sh
+        # source .ci/pytorch/install_cache_xla.sh
       fi
       if [[ "$USE_SPLIT_BUILD" == "true" ]]; then
         echo "USE_SPLIT_BUILD cannot be used with xla or rocm"

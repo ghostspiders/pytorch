@@ -17,8 +17,8 @@ mkdir -p /tmp/cache/bin
 mkdir -p /tmp/cache/lib
 export PATH="/tmp/cache/bin:$PATH"
 
-install_binary
-chmod a+x /tmp/cache/bin/sccache
+# install_binary
+# chmod a+x /tmp/cache/bin/sccache
 
 function write_sccache_stub() {
   # Unset LD_PRELOAD for ps because of asan + ps issues
@@ -35,5 +35,3 @@ write_sccache_stub gcc
 write_sccache_stub g++
 write_sccache_stub clang
 write_sccache_stub clang++
-
-sccache --start-server
