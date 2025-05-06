@@ -7340,6 +7340,11 @@ class TensorBox(MutableBox):
             return data
         return TensorBox(StorageBox(data))
 
+    def is_input_buffer(self) -> bool:
+        if hasattr(self.data, "is_input_buffer"):
+            return self.data.is_input_buffer()
+        return False
+
 
 class StorageBox(MutableBox):
     def is_input_buffer(self):  # type: ignore[no-untyped-def]
