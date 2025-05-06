@@ -10,7 +10,7 @@ set -ex -o pipefail
 
 install_binary() {
   echo "Downloading sccache binary from S3 repo"
-  curl --retry 3 https://s3.amazonaws.com/ossci-linux/sccache -o /tmp/cache/bin/sccache
+  curl --retry 3 https://s3.amazonaws.com/ossci-linux/sccache-v0.10.0 -o /tmp/cache/bin/sccache
 }
 
 mkdir -p /tmp/cache/bin
