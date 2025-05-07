@@ -18641,7 +18641,7 @@ op_db: list[OpInfo] = [
            sample_inputs_func=sample_inputs_scatter,
            error_inputs_func=error_inputs_scatter_and_scatter_add,
            skips=(
-               DecorateInfo(unittest.expectedFailure, 'TestCommon', 'test_non_standard_bool_values',
+               DecorateInfo(unittest.skip("Skipped on ROCm"), 'TestCommon', 'test_non_standard_bool_values',
                             dtypes=[torch.bool], device_type='cuda', active_if=TEST_WITH_ROCM),
            )),
     UnaryUfuncInfo(
@@ -19433,7 +19433,7 @@ op_db: list[OpInfo] = [
            supports_forward_ad=True,
            supports_fwgrad_bwgrad=True,
            skips=(
-               DecorateInfo(unittest.expectedFailure, 'TestCommon', 'test_non_standard_bool_values',
+               DecorateInfo(unittest.skip("Skipped on ROCm"), 'TestCommon', 'test_non_standard_bool_values',
                             dtypes=[torch.bool], device_type='cuda', active_if=TEST_WITH_ROCM),
            )),
     OpInfo('stack',
@@ -21615,7 +21615,7 @@ op_db: list[OpInfo] = [
         supports_fwgrad_bwgrad=True,
         sample_inputs_func=sample_inputs_scatter_reduce,
         skips=(
-            DecorateInfo(unittest.expectedFailure, 'TestCommon', 'test_non_standard_bool_values',
+            DecorateInfo(unittest.skip("Skipped on ROCm"), 'TestCommon', 'test_non_standard_bool_values',
                          dtypes=[torch.bool], device_type='cuda', active_if=TEST_WITH_ROCM),
         )),
     OpInfo(
