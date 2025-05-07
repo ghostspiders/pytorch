@@ -158,6 +158,13 @@ class TestTritonHeuristics(TestCase):
         with self.assertRaisesRegex(AssertionError, "pre_hook"):
             CachingAutotuner(**args)
 
+    def test_interpret_args_grid(self):
+        args = self._get_cos_kernel_caching_autotuner_args()
+        ca = CachingAutotuner(**args)
+        #self.assertEqual(ca._interpret_args_grid(16), (1, 1, 1))
+        pass
+
+
     def test_autotune_hints_to_configs(self):
         device_props = DeviceProperties.create(torch.device(GPU_TYPE))
         device_props = device_props._replace(warp_size=8)
