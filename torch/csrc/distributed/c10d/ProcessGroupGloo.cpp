@@ -4,9 +4,11 @@
 
 #ifdef USE_C10D_GLOO
 
+#include <torch/csrc/distributed/c10d/FlightRecorder.hpp>
 #include <torch/csrc/distributed/c10d/GlooDeviceFactory.hpp>
 #include <torch/csrc/distributed/c10d/PrefixStore.hpp>
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
+#include <torch/csrc/distributed/c10d/Utils.hpp>
 #include <chrono>
 #include <exception>
 
@@ -527,6 +529,7 @@ ProcessGroupGloo::AsyncWork::AsyncWork(
       seq_(seq) {
   if (profilingTitle != nullptr) {
     recordAsyncWorkProfilingInfo(profilingTitle, inputTensors);
+    profilingTitle_ = profilingTitle;
   }
 }
 
@@ -762,6 +765,8 @@ std::shared_ptr<::gloo::transport::Device> ProcessGroupGloo::
 }
 #endif
 
+static std::atomic<size_t> process_group_id = 0;
+
 ProcessGroupGloo::ProcessGroupGloo(
     const c10::intrusive_ptr<Store>& store,
     int rank,
@@ -771,7 +776,8 @@ ProcessGroupGloo::ProcessGroupGloo(
       store_(new GlooStore(store)),
       options_(std::move(options)),
       stop_(false),
-      collectiveCounter_(0) {
+      collectiveCounter_(0),
+      local_id_(process_group_id++) {
   auto& devices = options_->devices;
   if (devices.empty()) {
     TORCH_CHECK(false, "No device(s) specified");
@@ -831,6 +837,9 @@ ProcessGroupGloo::ProcessGroupGloo(
     threads_[i] = std::thread(&ProcessGroupGloo::runLoop, this, i);
   }
 
+  // TODO: If gloo has version, we also need to log gloo version into FR.
+  FlightRecorder<c10::Event>::get()->record_pg_ranks(
+      std::make_tuple(pg_uid_, pg_desc_), groupRanks());
   init();
 }
 
@@ -879,15 +888,43 @@ void ProcessGroupGloo::runLoop(int workerIndex) {
     workConsumeCV_.notify_one();
 
     AsyncWork::execute(work);
+    // TODO: Need to find a way to calculate the difference of duration of two
+    // c10d::Event
+    FlightRecorder<c10::Event>::get()->retire_id(work->trace_id_, false);
     lock.lock();
     workInProgress_[workerIndex].reset();
   }
+}
+
+const std::vector<uint64_t>& ProcessGroupGloo::groupRanks() const {
+  if (options_->global_ranks_in_group.empty() && local_id_ == 0) {
+    static std::vector<uint64_t> globalRanks(size_);
+    std::iota(globalRanks.begin(), globalRanks.end(), 0);
+    return globalRanks;
+  }
+  return options_->global_ranks_in_group;
 }
 
 void ProcessGroupGloo::enqueue(c10::intrusive_ptr<AsyncWork> work) {
   std::unique_lock<std::mutex> lock(workMutex_);
   workQueue_.push_back(std::move(work));
   lock.unlock();
+  // using c10d::FlightRecorder;
+  work->trace_id_ = FlightRecorder<c10::Event>::get()->record(
+      local_id_,
+      std::make_tuple(pg_uid_, pg_desc_),
+      collectiveCounter_,
+      0, // p2p_seq_id, set 0 for now since p2p does not call enqueue
+      work->getSequencenumber(), // We need to differentiate between p2p and
+                                 // non-p2p op.
+      work->getProfilerTitle(),
+      work->getInputTensors(),
+      work->getOutputTensors(),
+      nullptr, // We ignore cuda event entry for now.
+      nullptr,
+      work->getTimeout(),
+      pgStatus_,
+      false);
 
   // Notify after releasing the lock so that the waiter
   // does not immediately block.
@@ -930,6 +967,18 @@ class AsyncBroadcastWork : public ProcessGroupGloo::AsyncWork {
     opts.setTag(tag);
     GENERATE_ALL_TYPES(scalarType, setOutput, opts, tensor);
     gloo::broadcast(opts);
+  }
+
+  std::chrono::milliseconds getTimeout() const override {
+    return context->getTimeout();
+  }
+
+  const std::vector<at::Tensor> getInputTensors() override {
+    return inputs;
+  }
+
+  const std::vector<at::Tensor> getOutputTensors() override {
+    return inputs;
   }
 
   void run() override {
@@ -1081,6 +1130,18 @@ class AsyncAllreduceWork : public ProcessGroupGloo::AsyncWork {
     if (reduceOp == ReduceOp::AVG) {
       tensors[0] /= context->size;
     }
+  }
+
+  std::chrono::milliseconds getTimeout() const override {
+    return context->getTimeout();
+  }
+
+  const std::vector<at::Tensor> getInputTensors() override {
+    return inputs;
+  }
+
+  const std::vector<at::Tensor> getOutputTensors() override {
+    return inputs;
   }
 
   void run() override {
@@ -1291,6 +1352,18 @@ class AsyncSparseAllreduceWork : public ProcessGroupGloo::AsyncWork {
     for (const auto i : c10::irange(inputs.size())) {
       inputs[i].copy_(output);
     }
+  }
+
+  std::chrono::milliseconds getTimeout() const override {
+    return context->getTimeout();
+  }
+
+  const std::vector<at::Tensor> getInputTensors() override {
+    return inputs;
+  }
+
+  const std::vector<at::Tensor> getOutputTensors() override {
+    return inputs;
   }
 
  private:
@@ -1700,6 +1773,18 @@ class AsyncReduceWork : public ProcessGroupGloo::AsyncWork {
     reduce(inputs);
   }
 
+  std::chrono::milliseconds getTimeout() const override {
+    return context->getTimeout();
+  }
+
+  const std::vector<at::Tensor> getInputTensors() override {
+    return inputs;
+  }
+
+  const std::vector<at::Tensor> getOutputTensors() override {
+    return inputs;
+  }
+
  protected:
   template <typename T>
   void getFunction(gloo::ReduceOptions::Func& fn, const ReduceOp op) {
@@ -1882,6 +1967,18 @@ class AsyncAllgatherWork : public ProcessGroupGloo::AsyncWork {
         outputgroup[j].copy_(flatOutputTensor[static_cast<int64_t>(j)]);
       }
     }
+  }
+
+  std::chrono::milliseconds getTimeout() const override {
+    return context->getTimeout();
+  }
+
+  const std::vector<at::Tensor> getInputTensors() override {
+    return inputs;
+  }
+
+  const std::vector<at::Tensor> getOutputTensors() override {
+    return {newLikeFlat(outputs[0])};
   }
 
   void run() override {
@@ -2168,6 +2265,18 @@ class AsyncAllgatherCoalescedWork : public ProcessGroupGloo::AsyncWork {
     }
   }
 
+  std::chrono::milliseconds getTimeout() const override {
+    return context->getTimeout();
+  }
+
+  const std::vector<at::Tensor> getInputTensors() override {
+    return input_list;
+  }
+
+  const std::vector<at::Tensor> getOutputTensors() override {
+    return {newLikeFlat(output_lists[0])};
+  }
+
   void run() override {
     allgather_coalesced();
   }
@@ -2301,6 +2410,18 @@ class AsyncGatherWork : public ProcessGroupGloo::AsyncWork {
         outputs[0][i].copy_(flatOutputTensor[static_cast<int64_t>(i)]);
       }
     }
+  }
+
+  std::chrono::milliseconds getTimeout() const override {
+    return context->getTimeout();
+  }
+
+  const std::vector<at::Tensor> getInputTensors() override {
+    return inputs;
+  }
+
+  const std::vector<at::Tensor> getOutputTensors() override {
+    return {newLikeFlat(outputs[0])};
   }
 
   void run() override {
@@ -2497,6 +2618,18 @@ class AsyncScatterWork : public ProcessGroupGloo::AsyncWork {
     // Set single output tensor on all processes
     GENERATE_ALL_TYPES(scalarType, setOutput, opts, outputs[0]);
     gloo::scatter(opts);
+  }
+
+  std::chrono::milliseconds getTimeout() const override {
+    return context->getTimeout();
+  }
+
+  const std::vector<at::Tensor> getInputTensors() override {
+    return {newLikeFlat(inputs[0])};
+  }
+
+  const std::vector<at::Tensor> getOutputTensors() override {
+    return outputs;
   }
 
   void run() override {
@@ -2744,6 +2877,18 @@ class AsyncAlltoallWork : public ProcessGroupGloo::AsyncWork {
     }
   }
 
+  std::chrono::milliseconds getTimeout() const override {
+    return context->getTimeout();
+  }
+
+  const std::vector<at::Tensor> getInputTensors() override {
+    return {inputTensor};
+  }
+
+  const std::vector<at::Tensor> getOutputTensors() override {
+    return {outputTensor};
+  }
+
   void run() override {
     alltoall(outputTensor, inputTensor);
   }
@@ -2980,6 +3125,19 @@ class AsyncBarrierWork : public ProcessGroupGloo::AsyncWork {
   std::shared_ptr<gloo::Context> context;
   std::vector<c10::weak_intrusive_ptr<AsyncWork>> priorWork{};
   const uint32_t tag;
+  std::vector<at::Tensor> inputs{};
+
+  std::chrono::milliseconds getTimeout() const override {
+    return context->getTimeout();
+  }
+
+  const std::vector<at::Tensor> getInputTensors() override {
+    return inputs;
+  }
+
+  const std::vector<at::Tensor> getOutputTensors() override {
+    return inputs;
+  }
 
   void run() override {
     // Wait on prior work to complete
