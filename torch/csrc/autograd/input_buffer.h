@@ -15,7 +15,11 @@
 namespace torch::autograd {
 
 struct InputBuffer {
-  explicit InputBuffer(size_t size) : buffer(size) {}
+  explicit InputBuffer(size_t size)
+      : buffer(size),
+        opt_accum_streams(size),
+        ready_events(size),
+        ready_streams(size) {}
   InputBuffer(const InputBuffer& other) = delete;
   InputBuffer(InputBuffer&& other) = default;
   explicit InputBuffer(variable_list&& inputs) : buffer(std::move(inputs)) {}
@@ -38,6 +42,15 @@ struct InputBuffer {
   static std::vector<Variable> variables(InputBuffer&& g);
 
   std::vector<Variable> buffer;
+  // The stream used for accumulation when a variable is used multiple times.
+  std::vector<std::optional<c10::Stream>> opt_accum_streams;
+  // The events you need to wait for to ensure the corresponding buffers
+  // are ready. The events are updated as we accumulate into the buffer.
+  std::vector<std::optional<c10::Event>> ready_events;
+  // The streams corresponding to the events above.
+  std::vector<std::optional<c10::Stream>> ready_streams;
 };
+
+void _record_stream_any_impl(Variable& var, const c10::Stream& stream);
 
 } // namespace torch::autograd
