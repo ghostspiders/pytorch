@@ -122,6 +122,10 @@ except (unittest.SkipTest, ImportError):
     raise
 
 
+def _is_cpu_freezing(self):
+    return (config.freezing is None or config.freezing) and self.device != GPU_TYPE
+
+
 class AOTInductorTestsTemplate:
     def test_simple(self):
         class Model(torch.nn.Module):
@@ -4157,16 +4161,16 @@ class AOTInductorTestsTemplate:
         a = torch.randn(batch, M, K, device=self.device)
         example_inputs = (a,)
 
-        kernel_calls = (
-            [
+        is_cpu_freezing = _is_cpu_freezing(self)
+        if self.device == GPU_TYPE:
+            kernel_calls = [
                 ("triton_poi_fused_0", 1),
                 (f"aoti_torch_{GPU_TYPE}_addmm_out", 2),
             ]
-            if self.device == GPU_TYPE
-            else [
-                ("aoti_torch_cpu_addmm_out", 2),
-            ]
-        )
+        elif is_cpu_freezing:
+            kernel_calls = [("cpp_fused_0", 1)]
+        else:
+            kernel_calls = [("aoti_torch_cpu_addmm_out", 2)]
 
         # test default debug printing all tensor values codegen
         with config.patch({"aot_inductor.debug_intermediate_value_printer": "2"}):
@@ -4190,7 +4194,9 @@ class AOTInductorTestsTemplate:
                 ).run(code)
 
         # test printing selected kernel's tensor values codegen
-        filtered_kernel_name = f"aoti_torch_{self.device}_addmm_out"
+        filtered_kernel_name = (
+            "cpp_fused_0" if is_cpu_freezing else f"aoti_torch_{self.device}_addmm_out"
+        )
         with config.patch(
             {
                 "aot_inductor.debug_intermediate_value_printer": "2",
@@ -4201,7 +4207,7 @@ class AOTInductorTestsTemplate:
                 AOTIRunnerUtil.legacy_compile, model, example_inputs
             )
             filtered_kernel_calls = [
-                (filtered_kernel_name, 2),
+                (filtered_kernel_name, 1 if is_cpu_freezing else 2),
             ]
             for kernel_call, count in filtered_kernel_calls:
                 FileCheck().check_count(
@@ -4246,17 +4252,18 @@ class AOTInductorTestsTemplate:
         batch = 2
         a = torch.randn(batch, M, K, device=self.device)
         example_inputs = (a,)
-        kernel_calls = (
-            f"aoti_torch_{GPU_TYPE}_addmm_out"
-            if self.device == GPU_TYPE
-            else "aoti_torch_cpu_addmm_out"
+
+        kernel_call = (
+            "graph_1_cpp_fused_0"
+            if _is_cpu_freezing(self)
+            else f"aoti_torch_{self.device}_addmm_out"
         )
         with config.patch({"cpp.enable_kernel_profile": enable_kernel_profile}):
             _, code = run_and_get_cpp_code(
                 AOTIRunnerUtil.compile, model, example_inputs
             )
             shim_fn_codes = (
-                f'RECORD_FUNCTION("{kernel_calls}", c10::ArrayRef<c10::IValue>());'
+                f'RECORD_FUNCTION("{kernel_call}", c10::ArrayRef<c10::IValue>());'
             )
             if enable_kernel_profile:
                 FileCheck().check(shim_fn_codes).run(code)
@@ -4539,14 +4546,15 @@ class AOTInductorTestsTemplate:
         so_path, code = run_and_get_cpp_code(
             AOTIRunnerUtil.legacy_compile, model, example_inputs
         )
-        lowerbound_check = "u1 >= 1" if mark_unbacked else "u0 >= 2"
+        varname = f"u{int(mark_unbacked) + (2 if _is_cpu_freezing(self) else 0)}"
+        lowerbound_check = f"{varname} >= {1 if mark_unbacked else 2}"
         FileCheck().check_count(lowerbound_check, 1).run(code)
 
         compiled = AOTIRunnerUtil.legacy_load(self.device, so_path)
         compiled(*example_inputs)
 
         # Check the runtime assertion.
-        with self.assertRaisesRegex(Exception, ""):
+        with self.assertRaises(Exception):
             unexpected_inputs = (torch.ones(0, device=self.device), b, c)
             compiled(*unexpected_inputs)
 
