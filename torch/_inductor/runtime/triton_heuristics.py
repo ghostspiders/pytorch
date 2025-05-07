@@ -1068,7 +1068,7 @@ class CachingAutotuner(KernelInterface):
             dict(
                 zip(
                     [
-                        *self.fn.arg_names,
+                        *self.triton_meta['signature'].keys(), 
                         *self.inductor_meta.get("extra_launcher_args", ()),
                     ],
                     args,
