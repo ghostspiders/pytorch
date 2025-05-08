@@ -97,24 +97,35 @@ CapturedTraceback* getFromContext(
       "attempting to gather stack context from the wrong StackContext type.");
 }
 
+// 初始化记录注解系统，用于标记内存分配时的代码上下文
 void _initRecordAnnotations() {
+  // 使用静态局部变量确保只初始化一次
+  // [[maybe_unused]] 避免编译器警告
   static auto init_placeholder [[maybe_unused]] = [&] {
-    // Save user annotations to CCA memory snapshot tool
+    // 添加线程本地回调函数，用于在PyTorch操作执行时记录注解
     at::addThreadLocalCallback(
         at::RecordFunctionCallback(
+            // 操作开始时的回调函数
             [](const at::RecordFunction& fn)
                 -> std::unique_ptr<at::ObserverContext> {
+              // 记录操作开始标记到CUDA内存分配器
               c10::cuda::CUDACachingAllocator::recordAnnotation(
-                  {{"name", fn.name()}, {"stage", "START"}});
-              return nullptr;
+                  {{"name", fn.name()},  // 记录操作名称
+                   {"stage", "START"}}); // 标记为开始阶段
+              return nullptr;  // 不需要上下文对象
             },
+            // 操作结束时的回调函数
             [](const at::RecordFunction& fn, at::ObserverContext* ctx_ptr) {
+              // 记录操作结束标记到CUDA内存分配器
               c10::cuda::CUDACachingAllocator::recordAnnotation(
-                  {{"name", fn.name()}, {"stage", "END"}});
+                  {{"name", fn.name()},  // 记录操作名称
+                   {"stage", "END"}});   // 标记为结束阶段
             })
-            .scopes({at::RecordScope::USER_SCOPE}));
-    return true;
-  }();
+        // 只对用户定义的范围生效（避免记录框架内部操作）
+        .scopes({at::RecordScope::USER_SCOPE}));
+    
+    return true;  // 初始化标记
+  }();  // 立即执行lambda表达式
 }
 
 } // namespace
@@ -153,48 +164,74 @@ static void checkOptionIn(
       valid.end() != std::find(valid.begin(), valid.end(), option), error);
 }
 
+// 记录CUDA内存分配历史的函数
 void _record_memory_history(
-    std::optional<std::string> enabled,
-    std::optional<std::string> context,
-    const std::string& stacks,
-    size_t max_entries,
-    bool clearHistory) {
+    std::optional<std::string> enabled,   // 启用状态："state"/"all"/nullopt(禁用)
+    std::optional<std::string> context,   // 记录上下文："state"/"alloc"/"all"/nullopt
+    const std::string& stacks,           // 调用栈记录级别："python"/"all"
+    size_t max_entries,                  // 最大记录条目数
+    bool clearHistory) {                 // 是否清除已有历史记录
+    
+  // 参数校验：检查enabled参数是否合法
   if (enabled) {
     checkOptionIn(
         *enabled,
-        {"state", "all"},
-        "expected state to be 'state', 'all', or None");
+        {"state", "all"},  // 允许的值
+        "expected state to be 'state', 'all', or None");  // 错误提示
   }
+  
+  // 参数校验：检查context参数是否合法
   if (context) {
     checkOptionIn(
         *context,
-        {"state", "alloc", "all"},
-        "expected context to be 'state', 'alloc', 'all', or None");
+        {"state", "alloc", "all"},  // 允许的值
+        "expected context to be 'state', 'alloc', 'all', or None");  // 错误提示
   }
+  
+  // 参数校验：检查stacks参数是否合法
   checkOptionIn(
-      stacks, {"python", "all"}, "expected stacks to be 'python', or 'all'");
+      stacks, 
+      {"python", "all"},  // 允许的值
+      "expected stacks to be 'python', or 'all'");  // 错误提示
 
+  // 默认使用Python栈收集器
   c10::cuda::CUDACachingAllocator::CreateContextFn recorder = gather;
+  
+  // 如果启用完整记录且需要C++栈信息
   if (enabled && context && stacks == "all") {
-    recorder = gather_with_cpp;
-    // warm up C++ stack unwinding
+    recorder = gather_with_cpp;  // 切换到C++栈收集器
+    // 预热C++栈展开功能（减少首次调用的延迟）
     unwind::unwind();
   }
+  
+  // 调整最大记录条目数：如果不是"all"模式则设为1（最小化内存开销）
   max_entries = (enabled && *enabled == "all") ? max_entries : 1;
-  auto when = c10::cuda::CUDACachingAllocator::RecordContext::NEVER;
+  
+  // 设置记录触发条件
+  auto when = c10::cuda::CUDACachingAllocator::RecordContext::NEVER;  // 默认不记录
   if (context) {
     if (context == "all") {
-      when = c10::cuda::CUDACachingAllocator::RecordContext::ALL;
+      when = RecordContext::ALL;    // 记录所有内存操作
     } else if (context == "alloc") {
-      when = c10::cuda::CUDACachingAllocator::RecordContext::ALLOC;
+      when = RecordContext::ALLOC;  // 仅记录分配操作
     } else if (context == "state") {
-      when = c10::cuda::CUDACachingAllocator::RecordContext::STATE;
+      when = RecordContext::STATE;  // 仅记录当前状态
     }
   }
+  
+  // 延迟初始化CUDA上下文（避免不必要的初始化开销）
   at::globalContext().lazyInitDevice(c10::DeviceType::CUDA);
+  
+  // 初始化记录注解系统（用于标记特殊内存区域）
   _initRecordAnnotations();
+  
+  // 调用内存分配器的历史记录功能
   c10::cuda::CUDACachingAllocator::recordHistory(
-      enabled.has_value(), recorder, max_entries, when, clearHistory);
+      enabled.has_value(),  // 是否启用记录
+      recorder,            // 栈收集器函数
+      max_entries,         // 最大记录数
+      when,                // 记录触发条件
+      clearHistory);       // 是否清除历史
 }
 
 std::string _memory_snapshot_pickled() {

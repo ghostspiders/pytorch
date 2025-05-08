@@ -858,47 +858,43 @@ def _record_memory_history_legacy(
 def _record_memory_history(
     enabled: Literal[None, "state", "all"] = "all", *args, **kwargs
 ) -> None:
-    """Enable recording of stack traces associated with memory
-    allocations, so you can tell what allocated any piece of memory in
-    :func:`torch.cuda.memory._snapshot()`.
+    """启用内存分配相关堆栈跟踪记录功能，用于追踪内存分配来源。
+    
+    通过该功能可以：
+    1. 记录当前内存分配/释放的堆栈信息
+    2. 保留完整的内存操作历史记录（包括所有alloc/free事件）
+    
+    使用 torch.cuda.memory._snapshot() 获取记录数据，
+    并使用 _memory_viz.py 中的工具进行可视化分析。
 
-    In addition too keeping stack traces with each current allocation and free,
-    this will also enable recording of a history of all alloc/free events.
+    Python层堆栈收集速度极快（约2us/次），生产环境也可考虑启用以便调试内存问题。
+    C++层堆栈收集约50ns/帧，典型程序约2us/次（实际取决于调用栈深度）。
 
-    Use :func:`torch.cuda.memory._snapshot()` to retrieve this information,
-    and the tools in `_memory_viz.py` to visualize snapshots.
-
-    The Python trace collection is fast (2us per trace), so you may consider
-    enabling this on production jobs if you anticipate ever having to debug
-    memory issues.
-
-    C++ trace collection is also fast (~50ns/frame), which for many typical programs
-    works out to ~2us per trace, but can vary depending on stack depth.
-
-    Args:
-        enabled (Literal[None, "state", "all"], optional):
-            `None`, disable recording memory history.
-            `"state"`, keep information for currenly allocated memory.
-            `"all"`, additionally keep a history of all alloc/free calls.
-            Defaults to "all".
-        context (Literal[None, "state", "alloc", "all"], optional):
-            `None`, Do not record any tracebacks.
-            `"state"`, Record tracebacks for currently allocated memory.
-            `"alloc"`, additionally keep tracebacks for alloc calls.
-            `"all"`, additionally keep tracebacks for free calls.
-            Defaults to "all".
-        stacks (Literal["python", "all"], optional):
-            `"python"`, include Python, TorchScript, and inductor frames in tracebacks
-            `"all"`, additionally include C++ frames
-            Defaults to "all".
-        max_entries (int, optional): Keep a maximum of `max_entries`
-            alloc/free events in the recorded history recorded.
+    参数说明：
+        enabled (可选[None, "state", "all"]):
+            None - 禁用内存历史记录
+            "state" - 仅记录当前已分配内存的信息
+            "all" - 额外记录所有alloc/free调用历史（默认）
+            
+        context (可选[None, "state", "alloc", "all"]):
+            None - 不记录任何堆栈
+            "state" - 记录当前分配内存的堆栈
+            "alloc" - 额外记录分配调用的堆栈
+            "all" - 额外记录释放调用的堆栈（默认）
+            
+        stacks (可选["python", "all"]):
+            "python" - 仅包含Python/TorchScript/Inductor帧
+            "all" - 包含C++帧（默认）
+            
+        max_entries (int, 可选):
+            历史记录中保留的最大alloc/free事件数
+    
+    注意：如果传入布尔值参数，会调用旧版实现（向后兼容）
     """
     if isinstance(enabled, bool):
         return _record_memory_history_legacy(enabled, *args, **kwargs)
     else:
         return _record_memory_history_impl(enabled, *args, **kwargs)
-
 
 def _record_memory_history_impl(
     enabled: Optional[str] = "all",
