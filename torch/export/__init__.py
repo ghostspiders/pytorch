@@ -181,107 +181,53 @@ def export(
     preserve_module_call_signature: tuple[str, ...] = (),
 ) -> ExportedProgram:
     """
-    :func:`export` takes any nn.Module along with example inputs, and produces a traced graph representing
-    only the Tensor computation of the function in an Ahead-of-Time (AOT) fashion,
-    which can subsequently be executed with different inputs or serialized.  The
-    traced graph (1) produces normalized operators in the functional ATen operator set
-    (as well as any user-specified custom operators), (2) has eliminated all Python control
-    flow and data structures (with certain exceptions), and (3) records the set of
-    shape constraints needed to show that this normalization and control-flow elimination
-    is sound for future inputs.
+    :func:`export` 将任意nn.Module和示例输入转换为表示张量计算的前向追踪图（AOT模式），
+    该图可后续用不同输入执行或序列化。追踪图：
+    1. 生成标准化ATen算子集（及用户自定义算子）
+    2. 消除所有Python控制流和数据结构（特定例外除外）
+    3. 记录形状约束集以保证后续输入的合法性
 
-    **Soundness Guarantee**
-
-    While tracing, :func:`export()` takes note of shape-related assumptions
-    made by the user program and the underlying PyTorch operator kernels.
-    The output :class:`ExportedProgram` is considered valid only when these
-    assumptions hold true.
-
-    Tracing makes assumptions on the shapes (not values) of input tensors.
-    Such assumptions must be validated at graph capture time for :func:`export`
-    to succeed. Specifically:
-
-    - Assumptions on static shapes of input tensors are automatically validated without additional effort.
-    - Assumptions on dynamic shape of input tensors require explicit specification
-      by using the :func:`Dim` API to construct dynamic dimensions and by associating
-      them with example inputs through the ``dynamic_shapes`` argument.
-
-    If any assumption can not be validated, a fatal error will be raised. When that happens,
-    the error message will include suggested fixes to the specification that are needed
-    to validate the assumptions. For example :func:`export` might suggest the
-    following fix to the definition of a dynamic dimension ``dim0_x``, say appearing in the
-    shape associated with input ``x``, that was previously defined as ``Dim("dim0_x")``::
-
-        dim = Dim("dim0_x", max=5)
-
-    This example means the generated code requires dimension 0 of input ``x`` to be less
-    than or equal to 5 to be valid. You can inspect the suggested fixes to dynamic dimension
-    definitions and then copy them verbatim into your code without needing to change the
-    ``dynamic_shapes`` argument to your :func:`export` call.
+    **正确性保证**
+    追踪时会记录程序对张量形状的假设，仅当假设成立时输出:class:`ExportedProgram`才有效。
+    静态形状假设自动验证，动态形状需通过:func:`Dim` API显式声明。
 
     Args:
-        mod: We will trace the forward method of this module.
-
-        args: Example positional inputs.
-
-        kwargs: Optional example keyword inputs.
-
-        dynamic_shapes:
-         An optional argument where the type should either be:
-         1) a dict from argument names of ``f`` to their dynamic shape specifications,
-         2) a tuple that specifies dynamic shape specifications for each input in original order.
-         If you are specifying dynamism on keyword args, you will need to pass them in the order that
-         is defined in the original function signature.
-
-         The dynamic shape of a tensor argument can be specified as either
-         (1) a dict from dynamic dimension indices to :func:`Dim` types, where it is
-         not required to include static dimension indices in this dict, but when they are,
-         they should be mapped to None; or (2) a tuple / list of :func:`Dim` types or None,
-         where the :func:`Dim` types correspond to dynamic dimensions, and static dimensions
-         are denoted by None. Arguments that are dicts or tuples / lists of tensors are
-         recursively specified by using mappings or sequences of contained specifications.
-
-        strict: When disabled (default), the export function will trace the program through
-         Python runtime, which by itself will not validate some of the implicit assumptions
-         baked into the graph. It will still validate most critical assumptions like shape
-         safety. When enabled (by setting ``strict=True``), the export function will trace
-         the program through TorchDynamo which will ensure the soundness of the resulting
-         graph. TorchDynamo has limited Python feature coverage, thus you may experience more
-         errors. Note that toggling this argument does not affect the resulting IR spec to be
-         different and the model will be serialized in the same way regardless of what value
-         is passed here.
-
-        preserve_module_call_signature: A list of submodule paths for which the original
-         calling conventions are preserved as metadata. The metadata will be used when calling
-         torch.export.unflatten to preserve the original calling conventions of modules.
+        mod: 要追踪forward方法的模块
+        args: 示例位置参数
+        kwargs: 示例关键字参数（可选）
+        dynamic_shapes: 动态形状规范，可以是：
+          1) 参数字典：{参数名: 形状规范}
+          2) 元组：按参数顺序的形状规范
+          形状规范支持：
+          - 字典：{动态维度索引: Dim对象, 静态维度: None}
+          - 元组/列表：[Dim对象|None,...]
+        strict: 严格模式（默认False）：
+          - False: 通过Python运行时追踪（不验证隐式假设）
+          - True: 通过TorchDynamo追踪（确保结果图正确性）
+        preserve_module_call_signature: 需保留原始调用签名的子模块路径列表
 
     Returns:
-        An :class:`ExportedProgram` containing the traced callable.
+        :class:`ExportedProgram`: 包含追踪结果的不可变对象
 
-    **Acceptable input/output types**
-
-    Acceptable types of inputs (for ``args`` and ``kwargs``) and outputs include:
-
-    - Primitive types, i.e. ``torch.Tensor``, ``int``, ``float``, ``bool`` and ``str``.
-    - Dataclasses, but they must be registered by calling :func:`register_dataclass` first.
-    - (Nested) Data structures comprising of ``dict``, ``list``, ``tuple``, ``namedtuple`` and
-      ``OrderedDict`` containing all above types.
-
+    **支持的输入/输出类型**：
+    - 基础类型: Tensor, int, float, bool, str
+    - 已注册的数据类
+    - 嵌套容器: dict/list/tuple/namedtuple/OrderedDict
     """
     from ._trace import _export
 
+    # 输入验证
     if not isinstance(mod, torch.nn.Module):
         raise ValueError(
-            f"Expected `mod` to be an instance of `torch.nn.Module`, got {type(mod)}."
+            f"输入mod必须是torch.nn.Module类型，实际得到{type(mod)}"
         )
     if isinstance(mod, torch.jit.ScriptModule):
         raise ValueError(
-            "Exporting a ScriptModule is not supported. "
-            "Maybe try converting your ScriptModule to an ExportedProgram "
-            "using `TS2EPConverter(mod, args, kwargs).convert()` instead."
+            "不支持导出ScriptModule，请使用TS2EPConverter转换"
         )
 
     try:
+        # 调用底层导出实现
         return _export(
             mod,
             args,
@@ -289,34 +235,27 @@ def export(
             dynamic_shapes,
             strict=strict,
             preserve_module_call_signature=preserve_module_call_signature,
-            pre_dispatch=True,
+            pre_dispatch=True,  # 使用预分发模式
         )
     except Exception as e:
+        # 错误处理：针对特定错误类型追加诊断建议
         draft_export_msg = (
-            "The error above occurred when calling torch.export.export. If you would "
-            "like to view some more information about this error, and get a list "
-            "of all other errors that may occur in your export call, you can "
-            "replace your `export()` call with `draft_export()`."
+            "出现导出错误。如需查看详细错误分析，"
+            "可将export()替换为draft_export()"
         )
 
-        # For errors that we know can be caught by draft-export, add the message
-        # to ask users to try out draft-export
-        if isinstance(
-            e,
-            (
-                torch.fx.experimental.symbolic_shapes.GuardOnDataDependentSymNode,
-                torch._subclasses.fake_tensor.UnsupportedOperatorException,
-                torch._dynamo.exc.UserError,
-                torch.fx.experimental.symbolic_shapes.ConstraintViolationError,
-            ),
+        # 需要特殊处理的错误类型
+        spec_errors = (
+            torch.fx.experimental.symbolic_shapes.GuardOnDataDependentSymNode,
+            torch._subclasses.fake_tensor.UnsupportedOperatorException,
+            torch._dynamo.exc.UserError,
+            torch.fx.experimental.symbolic_shapes.ConstraintViolationError,
+        )
+        if isinstance(e, spec_errors) or (
+            isinstance(e, RuntimeError) and "no fake impl registered" in str(e)
         ):
-            new_msg = str(e) + "\n\n" + draft_export_msg
-            e.args = (new_msg,)
-        elif isinstance(e, RuntimeError) and "no fake impl registered" in str(e):
-            new_msg = str(e) + "\n\n" + draft_export_msg
-            e.args = (new_msg,)
+            e.args = (f"{str(e)}\n\n{draft_export_msg}",)
         raise e
-
 
 DEFAULT_PICKLE_PROTOCOL = 2
 
