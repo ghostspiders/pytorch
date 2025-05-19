@@ -1344,65 +1344,67 @@ def _strict_export(
     _to_aten_func: Callable,
 ) -> ExportArtifact:
     """
-    _to_aten_func can either be `_export_to_aten_ir_make_fx` or `_export_to_aten_ir`
+    严格导出函数，将PyTorch模块转换为导出格式
+    
+    _to_aten_func可以是`_export_to_aten_ir_make_fx`或`_export_to_aten_ir`
     """
 
+    # 第一步：将模块导出为Torch IR图
     gm_torch_level = _export_to_torch_ir(
         mod,
         args,
         kwargs,
         dynamic_shapes,
         preserve_module_call_signature=preserve_module_call_signature,
-        restore_fqn=False,  # don't need to restore because we will do it later
+        restore_fqn=False,  # 不需要立即恢复FQN，后面会处理
         allow_complex_guards_as_runtime_asserts=allow_complex_guards_as_runtime_asserts,
         _log_export_usage=False,
     )
 
-    # We detect the fake_mode by looking at gm_torch_level's placeholders, this is the fake_mode created in dynamo.
+    # 从gm_torch_level的占位符中检测fake_mode（这是在dynamo中创建的fake_mode）
     (
         fake_args,
         fake_kwargs,
         dynamo_fake_mode,
     ) = _extract_fake_inputs(gm_torch_level, args, kwargs)
 
+    # 将参数和缓冲区转换为fake tensor
     fake_params_buffers = _fakify_params_buffers(dynamo_fake_mode, gm_torch_level)
 
-    # First, we want to pass through the graph to try populating
-    # val field for getattr if there is anything missing.
-    # This can happen when quantization adds extra params and forgets
-    # to update "val"
+    # 遍历图中的所有节点，尝试为getattr节点填充val字段（如果有缺失的话）
+    # 这种情况可能在量化添加额外参数但忘记更新"val"时发生
     for node in gm_torch_level.graph.nodes:
         if node.op == "get_attr" and "val" not in node.meta:
             attr = getattr(gm_torch_level, node.target)
-            # Checks if it is not a HigherOrderOp branch or a module
+            # 检查是否是HigherOrderOp分支或模块
             if not isinstance(attr, torch.nn.Module):
                 assert (
                     dynamo_fake_mode is not None
-                ), "Cannot find dynamo_fake_mode. This could be due to the exported graph module have no placeholders."
+                ), "无法找到dynamo_fake_mode。这可能是因为导出的图模块没有占位符。"
                 node.meta["val"] = dynamo_fake_mode.from_tensor(
                     attr, static_shapes=True
                 )
 
-    # Fix the graph output signature to be tuple if scalar
+    # 将图输出签名固定为元组（如果是标量）
 
-    # gm_torch_level.graph._codegen is made a _PyTreeCodeGen in rewrite_signature in eval_frame.py
+    # gm_torch_level.graph._codegen在eval_frame.py的rewrite_signature中被设置为_PyTreeCodeGen
     assert isinstance(gm_torch_level.graph._codegen, torch.fx.graph._PyTreeCodeGen)
 
-    # Calling gm_torch_level._out_spec is not safe because gm_torch_level might be
-    # a _LazyGraphModule, which does not populate _out_spec when calling recompile().
-    # TODO: Fix recompile() in  _LazyGraphModule. T207713214
+    # 获取输出规范（out_spec）
     out_spec = orig_out_spec = gm_torch_level.graph._codegen.pytree_info.out_spec
 
-    # Used to get rid of lint type error.
+    # 用于消除lint类型错误
     assert out_spec is not None
     assert orig_out_spec is not None
 
-    # aot_export expect the return type to always be a tuple.
+    # aot_export期望返回类型始终是元组
     if out_spec.type not in (list, tuple):
         out_spec = pytree.TreeSpec(tuple, None, [out_spec])
 
+    # 获取原始参数名称
     orig_arg_names = gm_torch_level.graph._codegen.pytree_info.orig_args  # type: ignore[attr-defined]
 
+    # 重新设置图的代码生成器
     gm_torch_level.graph._codegen = _PyTreeCodeGen(
         _PyTreeInfo(
             orig_arg_names,
@@ -1412,21 +1414,20 @@ def _strict_export(
     )
     gm_torch_level.recompile()
 
+    # 规范化nn.Module堆栈
     _normalize_nn_module_stack(gm_torch_level, type(mod))
 
+    # 收集参数和缓冲区的元数据
     params_buffers_to_node_meta = _collect_param_buffer_metadata(gm_torch_level)
 
-    # When aot_export lifts the params, we lose metadata (e.g. source_fn_stack, stack_trace)
-    # from the param nodes as they are treated as fresh inputs
-    # Therefore, we manually extract them before calling into aot_export
-    # params_buffers_to_node_meta = _collect_param_buffer_metadata(gm_torch_level)
-
+    # 收集常量属性
     constant_attrs = _gather_constant_attrs(mod)
+    # 获取参数和缓冲区的映射表
     param_buffer_table: dict[str, str] = _get_param_buffer_mapping(mod, gm_torch_level)
 
-    # Dynamo does not track which buffers were registered as non-persistent. This info
-    # is available in the original module, so we transfer it to the traced module. Also,
-    # since we didn't restore original param/buffer names yet, we must use traced names.
+    # Dynamo不跟踪哪些缓冲区被注册为非持久性的。这个信息在原始模块中可用，
+    # 所以我们将其转移到跟踪模块中。此外，由于我们还没有恢复原始参数/缓冲区名称，
+    # 我们必须使用跟踪名称。
     non_persistent_buffers = _get_non_persistent_buffers(mod)
     reverse_name_lookup = {orig: traced for traced, orig in param_buffer_table.items()}
     gm_torch_level._non_persistent_buffers_set = {
@@ -1435,49 +1436,51 @@ def _strict_export(
         if name in reverse_name_lookup
     }
 
+    # 创建跟踪上下文并执行ATen导出
     tx = TracingContext(dynamo_fake_mode)
     with dynamo_fake_mode, tracing(tx):
         aten_export_artifact = _to_aten_func(
             gm_torch_level,
-            # NOTE: graph module expects only positional args
+            # 注意：图模块只期望位置参数
             _convert_to_positional_args(orig_arg_names, fake_args, fake_kwargs),
             {},
             fake_params_buffers,
             constant_attrs,
         )
 
-    # Decompose for readability.
+    # 分解结果以便于阅读
     gm = aten_export_artifact.gm
     export_graph_signature = aten_export_artifact.sig
     constants = aten_export_artifact.constants
 
+    # 将参数和缓冲区的元数据填充到新图模块中
     _populate_param_buffer_metadata_to_new_gm(
         params_buffers_to_node_meta, gm, export_graph_signature
     )
 
-    # Do some cleanups on the graph module to restore the state dict to the
-    # expected form. Each of these steps should probably get fixed upstream.
-    # 1. Remove tensor constants that were added as buffers.
+    # 对图模块进行一些清理工作，将状态字典恢复到预期形式
+    # 1. 移除被添加为缓冲区的张量常量
     _rewrite_dynamo_tensor_constants(
         orig_mod_buffers=set(mod.buffers()),
         traced_mod_buffers=dict(gm_torch_level.named_buffers()),
         graph_signature=export_graph_signature,
         constants=constants,
     )
-    # 2. Restore FQN of param/buffers
+    # 2. 恢复参数/缓冲区的FQN（完全限定名）
     _replace_param_buffer_names(param_buffer_table, export_graph_signature)
 
-    # 3. Move non-persistent buffers to tensor constants
+    # 3. 将非持久性缓冲区移动到张量常量
     _move_non_persistent_buffers_to_tensor_constants(
         mod, export_graph_signature, constants
     )
 
-    # 4. Rewrite constants to have the same FQN as the original module.
+    # 4. 重写常量以具有与原始模块相同的FQN
     _remap_constants(constant_attrs, export_graph_signature, constants)
 
-    # 5. Rename constants nodes in graph module from buffers to constants
+    # 5. 在图模块中将常量节点从缓冲区重命名为常量
     _rename_constants_nodes(gm, export_graph_signature)
 
+    # 返回导出结果
     return ExportArtifact(
         aten=aten_export_artifact,
         in_spec=orig_in_spec,
@@ -1777,96 +1780,99 @@ def set_missing_meta_vals(gm, flat_args, num_params_buffers):
 def _find_node(gm: torch.fx.GraphModule, name: str) -> torch.fx.Node:
     return next(iter(node for node in gm.graph.nodes if node.name == name))
 
-
 def _non_strict_export(
-    mod: torch.nn.Module,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    dynamic_shapes: Optional[Union[dict[str, Any], tuple[Any], list[Any]]],
-    preserve_module_call_signature: tuple[str, ...],
-    orig_in_spec: TreeSpec,
-    allow_complex_guards_as_runtime_asserts: bool,
-    _is_torch_jit_trace: bool,
-    _to_aten_func: Callable,
+    mod: torch.nn.Module,  # 待导出的PyTorch模型
+    args: tuple[Any, ...],  # 输入参数元组
+    kwargs: dict[str, Any],  # 输入关键字参数字典
+    dynamic_shapes: Optional[Union[dict[str, Any], tuple[Any], list[Any]]],  # 动态形状配置
+    preserve_module_call_signature: tuple[str, ...],  # 需要保留的模块调用签名
+    orig_in_spec: TreeSpec,  # 原始输入树结构规范
+    allow_complex_guards_as_runtime_asserts: bool,  # 允许复杂守卫作为运行时断言
+    _is_torch_jit_trace: bool,  # 是否为JIT跟踪模式标志
+    _to_aten_func: Callable,  # ATen IR转换函数
 ) -> ExportArtifact:
-    """
-    _to_aten_func can either be `_export_to_aten_ir_make_fx` or `_export_to_aten_ir`
-    """
-
+    """非严格模式导出函数，支持动态形状和模块签名保留"""
+    
+    # 输出/输入树结构规范初始化
     out_spec: Optional[TreeSpec] = None
     in_spec: Optional[TreeSpec] = None
-
+    
+    # 模块调用规范字典
     module_call_specs: dict[str, dict[str, pytree.TreeSpec]] = {}
 
     def _tuplify_outputs(aot_export):
+        """包装AOT导出函数以处理非严格模式"""
         def _aot_export_non_strict(mod, args, kwargs=None, **flags):
             kwargs = kwargs or {}
-
+            
             class Wrapper(torch.nn.Module):
+                """模型包装器用于捕获输入输出规范"""
                 def __init__(self, mod):
                     super().__init__()
-                    self._export_root = mod
+                    self._export_root = mod  # 保存原始模型引用
 
                 def forward(self, *args, **kwargs):
-                    nonlocal out_spec
-                    nonlocal in_spec
+                    """重写forward方法以捕获元数据"""
+                    nonlocal out_spec, in_spec
                     mod = self._export_root
+                    
+                    # 展平输入并记录结构
                     _, in_spec = pytree.tree_flatten((args, kwargs))
+                    
                     if isinstance(mod, torch.fx.GraphModule):
-                        # NOTE: We're going to run this graph module with an fx interpreter,
-                        # which will not run any forward hooks. Thus, ideally, we should run
-                        # all forward hooks here. But the general logic for running them is
-                        # complicated (see nn/module.py), and probably not worth duplicating.
-                        # Instead we only look for, and run, an export-specific forward hook.
-                        if (
-                            _check_input_constraints_pre_hook
-                            in mod._forward_pre_hooks.values()
-                        ):
+                        # 处理GraphModule特殊情况
+                        if _check_input_constraints_pre_hook in mod._forward_pre_hooks.values():
                             _check_input_constraints_pre_hook(mod, args, kwargs)
                         with torch.fx.traceback.preserve_node_meta():
                             args = (*args, *kwargs.values())
                             tree_out = torch.fx.Interpreter(mod).run(*args)
                     else:
                         tree_out = mod(*args, **kwargs)
+                    
+                    # 展平输出并记录结构
                     flat_outs, out_spec = pytree.tree_flatten(tree_out)
                     return tuple(flat_outs)
 
+            # 创建包装后的模型
             wrapped_mod = Wrapper(mod)
-            # Patch export_root to the signatures so that wrapper module correctly populates the
-            # in/out spec
+            
+            # 更新保留的调用签名路径
             new_preserved_call_signatures = [
                 "_export_root." + i for i in preserve_module_call_signature
             ]
+            
+            # 根据模型类型选择上下文管理器
             ctx = nullcontext()
             if not isinstance(mod, torch.fx.GraphModule):
-                ctx = _wrap_submodules(  # type: ignore[assignment]
+                ctx = _wrap_submodules(
                     wrapped_mod, new_preserved_call_signatures, module_call_specs
                 )
+            
+            # 执行AOT导出
             with ctx:
                 gm, sig = aot_export(wrapped_mod, args, kwargs=kwargs, **flags)
                 log.debug("Exported program from AOTAutograd:\n%s", gm)
 
+            # 清理签名中的根路径
             sig.parameters = pytree.tree_map(_strip_root, sig.parameters)
             sig.buffers = pytree.tree_map(_strip_root, sig.buffers)
             sig.inputs_to_buffers = pytree.tree_map(_strip_root, sig.inputs_to_buffers)
-            sig.inputs_to_parameters = pytree.tree_map(
-                _strip_root, sig.inputs_to_parameters
-            )
+            sig.inputs_to_parameters = pytree.tree_map(_strip_root, sig.inputs_to_parameters)
             sig.buffers_to_mutate = pytree.tree_map(_strip_root, sig.buffers_to_mutate)
 
+            # 清理节点元数据中的模块栈信息
             for node in gm.graph.nodes:
                 if "nn_module_stack" in node.meta:
                     nn_module_stack = node.meta["nn_module_stack"]
                     node.meta["nn_module_stack"] = {
                         _fixup_key(key): val
-                        for key, val in pytree.tree_map(
-                            _strip_root, nn_module_stack
-                        ).items()
+                        for key, val in pytree.tree_map(_strip_root, nn_module_stack).items()
                     }
 
             return gm, sig
 
         return _aot_export_non_strict
+
 
     (
         fake_mode,
