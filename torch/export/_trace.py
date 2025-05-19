@@ -1951,17 +1951,19 @@ def _non_strict_export(
 @_log_export_wrapper
 @_disable_prexisiting_fake_mode
 def _export_for_training(
-    mod: torch.nn.Module,
-    args: tuple[Any, ...],
-    kwargs: Optional[dict[str, Any]] = None,
-    dynamic_shapes: Optional[Union[dict[str, Any], tuple[Any], list[Any]]] = None,
+    mod: torch.nn.Module,  # 待导出的PyTorch模型
+    args: tuple[Any, ...],  # 示例输入参数（位置参数）
+    kwargs: Optional[dict[str, Any]] = None,  # 示例输入参数（关键字参数）
+    dynamic_shapes: Optional[Union[dict[str, Any], tuple[Any], list[Any]]] = None,  # 动态形状配置
     *,
-    strict: bool = True,
-    preserve_module_call_signature: tuple[str, ...] = (),
+    strict: bool = True,  # 是否启用严格模式（严格跟踪所有操作）
+    preserve_module_call_signature: tuple[str, ...] = (),  # 需要保留原始调用签名的子模块路径
 ) -> ExportedProgram:
+    """专为训练场景优化的模型导出函数"""
     global _EXPORT_MODULE_HIERARCHY
-    _EXPORT_MODULE_HIERARCHY = _get_module_hierarchy(mod)
+    _EXPORT_MODULE_HIERARCHY = _get_module_hierarchy(mod)  # 获取模型层次结构
 
+    # 处理输入参数，生成标准化格式
     (
         args,
         kwargs,
@@ -1970,11 +1972,12 @@ def _export_for_training(
         verify_additional_inputs,
     ) = _process_export_inputs(mod, args, kwargs, dynamic_shapes)
 
-    original_state_dict = _get_original_state_dict(mod)
+    original_state_dict = _get_original_state_dict(mod)  # 获取模型原始状态字典
 
-    # Call the appropriate export function based on the strictness of tracing.
+    # 根据strict参数选择导出函数
     export_func = _strict_export if strict else _non_strict_export
 
+    # 执行核心导出操作
     export_artifact = export_func(
         mod=mod,
         args=args,
@@ -1987,14 +1990,15 @@ def _export_for_training(
         _to_aten_func=_export_to_aten_ir_make_fx,
     )
 
-    export_graph_signature = export_artifact.aten.sig
+    export_graph_signature = export_artifact.aten.sig  # 获取导出图的签名信息
 
+    # 获取前向传播参数名
     forward_arg_names = _get_forward_arg_names(mod, args, kwargs)
+    # 获取内联约束条件
     inline_constraints = _get_inline_constraints(export_artifact.fake_mode)
-    # The unbacked symint symbols are updated in aot_export
-    # so we serialize them here instead of inside dynamo.
-    # Note: _get_range_constraints depends on "inline_constraints" to be set.
+    # 将约束信息存入graph module的meta数据
     export_artifact.aten.gm.meta["inline_constraints"] = inline_constraints
+    # 获取范围约束（用于动态形状）
     range_constraints = _get_range_constraints(
         mod,
         export_artifact,
@@ -2002,7 +2006,7 @@ def _export_for_training(
         kwargs,
         dynamic_shapes,
     )
-    # The returned the gm is in-place modified
+    # 获取模块调用图
     gm, module_call_graph = _get_module_call_graph(
         export_artifact,
         preserve_module_call_signature,
@@ -2010,27 +2014,29 @@ def _export_for_training(
         forward_arg_names,
     )
 
-    _verify_nn_module_stack(gm)
-    _verify_stack_trace(gm)
-    _verify_placeholder_names(gm, export_graph_signature)
+    # 执行多项验证
+    _verify_nn_module_stack(gm)  # 验证nn.Module堆栈
+    _verify_stack_trace(gm)  # 验证堆栈跟踪
+    _verify_placeholder_names(gm, export_graph_signature)  # 验证占位符名称
 
-    _update_gm_meta_if_possible(gm, mod)
+    _update_gm_meta_if_possible(gm, mod)  # 更新graph module的meta信息
 
     from torch._export.verifier import TrainingIRVerifier
 
+    # 构建最终的ExportedProgram对象
     exported_program = ExportedProgram(
-        root=gm,
-        graph=gm.graph,
-        graph_signature=export_graph_signature,
-        state_dict=original_state_dict,
-        range_constraints=range_constraints,
-        module_call_graph=module_call_graph,
-        example_inputs=(args, kwargs),
-        constants=export_artifact.aten.constants,
-        verifiers=[TrainingIRVerifier],
+        root=gm,  # 导出的graph module
+        graph=gm.graph,  # 计算图
+        graph_signature=export_graph_signature,  # 图签名
+        state_dict=original_state_dict,  # 原始状态字典
+        range_constraints=range_constraints,  # 范围约束
+        module_call_graph=module_call_graph,  # 模块调用图
+        example_inputs=(args, kwargs),  # 示例输入
+        constants=export_artifact.aten.constants,  # 常量
+        verifiers=[TrainingIRVerifier],  # 验证器（训练专用）
     )
 
-    verify_additional_inputs(exported_program)
+    verify_additional_inputs(exported_program)  # 验证额外输入
     return exported_program
 
 
@@ -2044,77 +2050,41 @@ def _export(
     *,
     strict: bool = True,
     preserve_module_call_signature: tuple[str, ...] = (),
-    pre_dispatch: bool = False,
-    allow_complex_guards_as_runtime_asserts: bool = False,
-    _is_torch_jit_trace: bool = False,
+    pre_dispatch: bool = False,  # 是否使用预调度模式
+    allow_complex_guards_as_runtime_asserts: bool = False,  # 是否允许复杂约束作为运行时断言
+    _is_torch_jit_trace: bool = False,  # 是否使用TorchScript跟踪
 ) -> ExportedProgram:
     """
-    Traces either an nn.Module's forward function or just a callable with PyTorch
-    operations inside and produce a ExportedProgram.
-
-    Args:
-        f: the `nn.Module` to trace.
-
-        args: example positional inputs.
-
-        kwargs: optional example keyword inputs.
-
-        dynamic_shapes:
-         An optional argument where the type should either be:
-         1) a dict from argument names of ``f`` to their dynamic shape specifications,
-         2) a tuple that specifies dynamic shape specifications for each input in original order.
-         If you are specifying dynamism on keyword args, you will need to pass them in the order that
-         is defined in the original function signature.
-
-         The dynamic shape of a tensor argument can be specified as either
-         (1) a dict from dynamic dimension indices to :func:`Dim` types, where it is
-         not required to include static dimension indices in this dict, but when they are,
-         they should be mapped to None; or (2) a tuple / list of :func:`Dim` types or None,
-         where the :func:`Dim` types correspond to dynamic dimensions, and static dimensions
-         are denoted by None. Arguments that are dicts or tuples / lists of tensors are
-         recursively specified by using mappings or sequences of contained specifications.
-
-        preserve_module_call_signature: A list of submodule paths for which the original
-            calling conventions are preserved as metadata.
-
-        allow_complex_guards_as_runtime_asserts:
-         With the current dynamic shapes language for dims and derived dims, we can run into constraints
-         that are not expressible with the language. For example, flattening a matrix and adding to a vector,
-         both fully dynamic (i.e. x.reshape([-1]) + y) emits a guard s0 * s1 = s2, which is not expressible.
-         By default, we either raise a constraint violation error or specialize to static values.
-         If this flag is set to True, we avoid erroring out and instead allow complex constraints to exist as runtime
-         assertions in the graph. The sympy interpreter (torch/utils/_sympy/interp.py) will produce the math ops
-         required to compute and assert the value of the guard (e.g. sym_size_int, eq, _assert_scalar).
-         Additionally, if TORCH_DYNAMO_DO_NOT_EMIT_RUNTIME_ASSERTS=1 is specified, we will allow complex constraints
-         while not emitting runtime asserts, returning a cleaner graph with lesser guarantees around dynamic shapes.
-
-    Returns:
-        An ExportedProgram containing the traced method.
+    核心导出函数：将nn.Module或可调用对象转换为ExportedProgram
+    
+    参数说明：
+    dynamic_shapes - 动态形状配置，可以是：
+      1) 参数字典到动态形状规范的映射
+      2) 按原始顺序为每个输入指定动态形状规范的元组
+    
+    preserve_module_call_signature - 需要保留原始调用签名的子模块路径
+    
+    allow_complex_guards_as_runtime_asserts - 当遇到无法表达的动态形状约束时：
+      True: 允许作为运行时断言存在
+      False: 抛出错误或特化为静态值
     """
-
     from torch._utils_internal import export_training_ir_rollout_check
 
     global _EXPORT_FLAGS, _EXPORT_MODULE_HIERARCHY
-    _EXPORT_MODULE_HIERARCHY = _get_module_hierarchy(mod)
+    _EXPORT_MODULE_HIERARCHY = _get_module_hierarchy(mod)  # 获取模型层次结构
 
+    # 设置导出标志
     flags = set()
     flags.add("strict" if strict else "non_strict")
     flags.add("pre_dispatch" if pre_dispatch else "aot_dispatch")
     _EXPORT_FLAGS = flags
 
-    log_export_usage(event="export.enter", flags=_EXPORT_FLAGS)
+    log_export_usage(event="export.enter", flags=_EXPORT_FLAGS)  # 记录导出事件
+    dtrace_structured("export", payload_fn=lambda: "start!")  # 诊断跟踪
 
-    dtrace_structured("export", payload_fn=lambda: "start!")
-
-    # NOTE Export training IR rollout
-    # Old export calls export._trace(pre_dispatch=True)
-    # and there are still lot of internal/OSS callsites that
-    # use export._trace(pre_dispatch=True) directly. Therefore,
-    # it makes more sense to do the switch here.
-    # export_training_ir_rollout_check returns True in OSS
-    # while internally it returns False UNLESS otherwise specified.
+    # 训练IR的特殊处理路径
     if pre_dispatch and export_training_ir_rollout_check():
-        ep = _export_for_training(
+        ep = _export_for_training(  # 调用训练专用导出函数
             mod,
             args,
             kwargs,
@@ -2125,20 +2095,22 @@ def _export(
         dtrace_structured("exported_program", payload_fn=lambda: str(ep))
         return ep
 
+    # 标准导出流程
     (
         args,
         kwargs,
         original_in_spec,
         dynamic_shapes,
         verify_additional_inputs,
-    ) = _process_export_inputs(mod, args, kwargs, dynamic_shapes)
+    ) = _process_export_inputs(mod, args, kwargs, dynamic_shapes)  # 处理输入
 
-    original_state_dict = _get_original_state_dict(mod)
+    original_state_dict = _get_original_state_dict(mod)  # 获取原始状态字典
 
-    # Call the appropriate export function based on the strictness of tracing.
+    # 根据strict参数选择导出函数
     export_func = _strict_export if strict else _non_strict_export
 
-    export_artifact = export_func(  # type: ignore[operator]
+    # 执行核心导出操作
+    export_artifact = export_func(
         mod=mod,
         args=args,
         kwargs=kwargs,
@@ -2147,22 +2119,22 @@ def _export(
         orig_in_spec=original_in_spec,
         allow_complex_guards_as_runtime_asserts=allow_complex_guards_as_runtime_asserts,
         _is_torch_jit_trace=_is_torch_jit_trace,
-        _to_aten_func=functools.partial(
+        _to_aten_func=functools.partial(  # 指定ATen IR转换函数
             _export_to_aten_ir,
             pre_dispatch=pre_dispatch,
             _is_torch_jit_trace=_is_torch_jit_trace,
         ),
     )
-    export_graph_signature: ExportGraphSignature = export_artifact.aten.sig
+    export_graph_signature: ExportGraphSignature = export_artifact.aten.sig  # 获取图签名
 
+    # 获取前向传播参数名（TorchScript跟踪模式除外）
     forward_arg_names = (
         _get_forward_arg_names(mod, args, kwargs) if not _is_torch_jit_trace else None
     )
+    # 获取并存储内联约束
     inline_constraints = _get_inline_constraints(export_artifact.fake_mode)
-    # The unbacked symint symbols are updated in aot_export
-    # so we serialize them here instead of inside dynamo.
-    # Note: this step must be before _get_range_constraints.
     export_artifact.aten.gm.meta["inline_constraints"] = inline_constraints
+    # 获取范围约束
     range_constraints = _get_range_constraints(
         mod,
         export_artifact,
@@ -2171,6 +2143,7 @@ def _export(
         dynamic_shapes,
         _is_torch_jit_trace=_is_torch_jit_trace,
     )
+    # 获取模块调用图
     gm, module_call_graph = _get_module_call_graph(
         export_artifact,
         preserve_module_call_signature,
@@ -2178,18 +2151,20 @@ def _export(
         forward_arg_names,
     )
 
-    _verify_nn_module_stack(gm)
-    _verify_stack_trace(gm)
+    # 执行验证
+    _verify_nn_module_stack(gm)  # 验证nn.Module堆栈
+    _verify_stack_trace(gm)  # 验证堆栈跟踪
     if not _is_torch_jit_trace:
-        _verify_placeholder_names(gm, export_graph_signature)
+        _verify_placeholder_names(gm, export_graph_signature)  # 验证占位符名称
 
-    # Remove Proxy because they cannot be deepcopied or pickled.
+    # 移除无法序列化的Proxy对象
     torch._export.utils.remove_proxy_from_state_dict(original_state_dict, in_place=True)
 
     from torch._export.verifier import Verifier
 
-    _update_gm_meta_if_possible(gm, mod)
+    _update_gm_meta_if_possible(gm, mod)  # 更新graph module的meta信息
 
+    # 构建最终导出的程序对象
     exported_program = ExportedProgram(
         root=gm,
         graph=gm.graph,
@@ -2199,10 +2174,10 @@ def _export(
         module_call_graph=module_call_graph,
         example_inputs=(args, kwargs),
         constants=export_artifact.aten.constants,
-        verifiers=[Verifier],
+        verifiers=[Verifier],  # 使用标准验证器
     )
 
     dtrace_structured("exported_program", payload_fn=lambda: str(exported_program))
 
-    verify_additional_inputs(exported_program)
+    verify_additional_inputs(exported_program)  # 验证额外输入
     return exported_program

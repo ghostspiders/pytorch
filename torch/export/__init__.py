@@ -216,14 +216,15 @@ def export(
     """
     from ._trace import _export
 
-    # 输入验证
     if not isinstance(mod, torch.nn.Module):
         raise ValueError(
-            f"输入mod必须是torch.nn.Module类型，实际得到{type(mod)}"
+            f"Expected `mod` to be an instance of `torch.nn.Module`, got {type(mod)}."
         )
     if isinstance(mod, torch.jit.ScriptModule):
         raise ValueError(
-            "不支持导出ScriptModule，请使用TS2EPConverter转换"
+            "Exporting a ScriptModule is not supported. "
+            "Maybe try converting your ScriptModule to an ExportedProgram "
+            "using `TS2EPConverter(mod, args, kwargs).convert()` instead."
         )
 
     try:
