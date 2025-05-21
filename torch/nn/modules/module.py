@@ -77,42 +77,57 @@ _global_parameter_registration_hooks: dict[int, Callable] = OrderedDict()
 
 
 class _WrappedHook:
-    def __init__(self, hook: Callable, module: Optional["Module"] = None):
-        self.hook: Callable = hook
-        functools.update_wrapper(self, hook)
+    """包装钩子函数的类，用于处理普通函数或与模块关联的钩子函数"""
 
-        self.with_module: bool = False
+    def __init__(self, hook: Callable, module: Optional["Module"] = None):
+        """初始化包装的钩子
+        Args:
+            hook: 要包装的钩子函数
+            module: 可选的关联模块，如果提供则创建弱引用
+        """
+        self.hook: Callable = hook  # 原始钩子函数
+        functools.update_wrapper(self, hook)  # 保留原始函数的元数据
+
+        self.with_module: bool = False  # 标记是否关联模块
 
         if module is not None:
+            # 创建模块的弱引用，避免循环引用导致内存泄漏
             self.module: weakref.ReferenceType[Module] = weakref.ref(module)
             self.with_module = True
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """调用钩子函数"""
         if self.with_module:
+            # 如果关联模块，先获取模块引用
             module = self.module()
             if module is None:
-                raise RuntimeError("You are trying to call the hook of a dead Module!")
+                raise RuntimeError("尝试调用已销毁模块的钩子！")
+            # 将模块作为第一个参数传入
             return self.hook(module, *args, **kwargs)
+        # 普通钩子直接调用
         return self.hook(*args, **kwargs)
 
     def __getstate__(self) -> dict:
-        result = {"hook": self.hook, "with_module": self.with_module}
+        """序列化时调用的方法"""
+        result = {
+            "hook": self.hook, 
+            "with_module": self.with_module
+        }
         if self.with_module:
+            # 如果关联模块，保存模块的实际对象（不是弱引用）
             result["module"] = self.module()
-
         return result
 
     def __setstate__(self, state: dict):
+        """反序列化时调用的方法"""
         self.hook = state["hook"]
         self.with_module = state["with_module"]
 
         if self.with_module:
             if state["module"] is None:
-                raise RuntimeError(
-                    "You are trying to revive the hook of a dead Module!"
-                )
+                raise RuntimeError("尝试恢复已销毁模块的钩子！")
+            # 重新创建模块的弱引用
             self.module = weakref.ref(state["module"])
-
 
 r"""This tracks hooks common to all modules that are executed before/after
 calling forward and backward. This is global state used for debugging/profiling
@@ -131,24 +146,23 @@ _EXTRA_STATE_KEY_SUFFIX = "_extra_state"
 def register_module_buffer_registration_hook(
     hook: Callable[..., None],
 ) -> RemovableHandle:
-    r"""Register a buffer registration hook common to all modules.
+    r"""注册一个适用于所有模块的buffer注册全局钩子函数
 
     .. warning ::
+        注意：这会向`nn.Module`模块添加全局状态
 
-        This adds global state to the `nn.Module` module
+    每次调用:func:`register_buffer`时都会触发该钩子。
+    钩子函数应遵循以下签名格式::
 
-    The hook will be called every time :func:`register_buffer` is invoked.
-    It should have the following signature::
+        hook(module, name, buffer) -> None 或 返回修改后的新buffer
 
-        hook(module, name, buffer) -> None or new buffer
+    钩子可以修改输入参数，或者返回单个修改后的值。
 
-    The hook can modify the input or return a single modified value in the hook.
-
-    Returns:
+    返回:
         :class:`torch.utils.hooks.RemovableHandle`:
-            a handle that can be used to remove the added hook by calling
-            ``handle.remove()``
+            返回一个可移除句柄，通过调用``handle.remove()``可以移除该钩子
     """
+    # 创建可移除句柄并将其添加到全局buffer注册钩子字典
     handle = RemovableHandle(_global_buffer_registration_hooks)
     _global_buffer_registration_hooks[handle.id] = hook
     return handle
@@ -157,82 +171,73 @@ def register_module_buffer_registration_hook(
 def register_module_module_registration_hook(
     hook: Callable[..., None],
 ) -> RemovableHandle:
-    r"""Register a module registration hook common to all modules.
+    r"""注册一个适用于所有模块的子模块注册全局钩子函数
 
     .. warning ::
+        注意：这会向`nn.Module`模块添加全局状态
 
-        This adds global state to the `nn.Module` module
+    每次调用:func:`register_module`时都会触发该钩子。
+    钩子函数应遵循以下签名格式::
 
-    The hook will be called every time :func:`register_module` is invoked.
-    It should have the following signature::
+        hook(module, name, submodule) -> None 或 返回修改后的新子模块
 
-        hook(module, name, submodule) -> None or new submodule
+    钩子可以修改输入参数，或者返回单个修改后的值。
 
-    The hook can modify the input or return a single modified value in the hook.
-
-    Returns:
+    返回:
         :class:`torch.utils.hooks.RemovableHandle`:
-            a handle that can be used to remove the added hook by calling
-            ``handle.remove()``
+            返回一个可移除句柄，通过调用``handle.remove()``可以移除该钩子
     """
+    # 创建可移除句柄并将其添加到全局模块注册钩子字典
     handle = RemovableHandle(_global_module_registration_hooks)
     _global_module_registration_hooks[handle.id] = hook
     return handle
 
-
 def register_module_parameter_registration_hook(
     hook: Callable[..., None],
 ) -> RemovableHandle:
-    r"""Register a parameter registration hook common to all modules.
+    r"""注册一个适用于所有模块的参数注册全局钩子函数
 
     .. warning ::
+        警告：这会向`nn.Module`模块添加全局状态
 
-        This adds global state to the `nn.Module` module
+    每次调用:func:`register_parameter`时都会触发该钩子。
+    钩子函数应遵循以下签名格式::
+        hook(module, name, param) -> None 或 返回修改后的新参数
 
-    The hook will be called every time :func:`register_parameter` is invoked.
-    It should have the following signature::
+    钩子可以修改输入参数，或者返回单个修改后的值。
 
-        hook(module, name, param) -> None or new parameter
-
-    The hook can modify the input or return a single modified value in the hook.
-
-    Returns:
+    返回:
         :class:`torch.utils.hooks.RemovableHandle`:
-            a handle that can be used to remove the added hook by calling
-            ``handle.remove()``
+            返回一个可移除句柄，通过调用``handle.remove()``可以移除该钩子
     """
+    # 创建可移除句柄并添加到全局参数注册钩子字典
     handle = RemovableHandle(_global_parameter_registration_hooks)
     _global_parameter_registration_hooks[handle.id] = hook
     return handle
 
 
 def register_module_forward_pre_hook(hook: Callable[..., None]) -> RemovableHandle:
-    r"""Register a forward pre-hook common to all modules.
+    r"""注册一个适用于所有模块的前向传播预处理全局钩子
 
     .. warning ::
+        警告：这会向`nn.module`模块添加全局状态，
+        且仅用于调试/性能分析目的
 
-        This adds global state to the `nn.module` module
-        and it is only intended for debugging/profiling purposes.
+    每次调用:func:`forward`前都会触发该钩子。
+    钩子函数应遵循以下签名格式::
+        hook(module, input) -> None 或 修改后的输入
 
-    The hook will be called every time before :func:`forward` is invoked.
-    It should have the following signature::
+    输入仅包含传给模块的位置参数，关键字参数不会传给钩子，
+    只会传给``forward``方法。钩子可以修改输入参数，用户可以返回
+    一个元组或单个修改值。如果返回单个值(非元组)，我们会自动将其包装成元组。
 
-        hook(module, input) -> None or modified input
+    此钩子的优先级高于通过``register_forward_pre_hook``注册的模块特定钩子。
 
-    The input contains only the positional arguments given to the module.
-    Keyword arguments won't be passed to the hooks and only to the ``forward``.
-    The hook can modify the input. User can either return a tuple or a
-    single modified value in the hook. We will wrap the value into a tuple
-    if a single value is returned(unless that value is already a tuple).
-
-    This hook has precedence over the specific module hooks registered with
-    ``register_forward_pre_hook``.
-
-    Returns:
+    返回:
         :class:`torch.utils.hooks.RemovableHandle`:
-            a handle that can be used to remove the added hook by calling
-            ``handle.remove()``
+            返回一个可移除句柄，通过调用``handle.remove()``可以移除该钩子
     """
+    # 创建可移除句柄并添加到全局前向预处理钩子字典
     handle = RemovableHandle(_global_forward_pre_hooks)
     _global_forward_pre_hooks[handle.id] = hook
     return handle
@@ -244,38 +249,35 @@ def register_module_forward_hook(
     with_kwargs: bool = False,
     always_call: bool = False,
 ) -> RemovableHandle:
-    r"""Register a global forward hook for all the modules.
+    r"""为所有模块注册全局前向传播钩子
 
     .. warning ::
+        警告：这会向`nn.module`模块添加全局状态，
+        且仅用于调试/性能分析目的
 
-        This adds global state to the `nn.module` module
-        and it is only intended for debugging/profiling purposes.
+    每次调用:func:`forward`计算出输出后都会触发该钩子。
+    钩子函数应遵循以下签名格式::
+        hook(module, input, output) -> None 或 修改后的输出
 
-    The hook will be called every time after :func:`forward` has computed an output.
-    It should have the following signature::
+    输入仅包含传给模块的位置参数，关键字参数不会传给钩子，
+    只会传给``forward``方法。可以通过返回新值来修改模块的输出，
+    该值将替换:func:`forward`函数的原始输出。
 
-        hook(module, input, output) -> None or modified output
-
-    The input contains only the positional arguments given to the module.
-    Keyword arguments won't be passed to the hooks and only to the ``forward``.
-    You can optionally modify the output of the module by returning a new value
-    that will replace the output from the :func:`forward` function.
-
-    Parameters:
-        hook (Callable): The user defined hook to be registered.
-        always_call (bool): If ``True`` the ``hook`` will be run regardless of
-            whether an exception is raised while calling the Module.
-            Default: ``False``
-    Returns:
+    参数:
+        hook (Callable): 要注册的用户定义钩子
+        with_kwargs (bool): 是否传递关键字参数给钩子
+        always_call (bool): 如果为``True``，即使模块调用时发生异常也会执行钩子
+            默认: ``False``
+    返回:
         :class:`torch.utils.hooks.RemovableHandle`:
-            a handle that can be used to remove the added hook by calling
-            ``handle.remove()``
+            返回一个可移除句柄，通过调用``handle.remove()``可以移除该钩子
 
-    This hook will be executed before specific module hooks registered with
-    ``register_forward_hook``.
+    此钩子会在通过``register_forward_hook``注册的模块特定钩子之前执行。
     """
+    # 创建可移除句柄并管理多个相关字典
     handle = RemovableHandle(
-        _global_forward_hooks, extra_dict=_global_forward_hooks_always_called
+        _global_forward_hooks, 
+        extra_dict=_global_forward_hooks_always_called
     )
     _global_forward_hooks[handle.id] = hook
     if with_kwargs:
@@ -283,32 +285,31 @@ def register_module_forward_hook(
     if always_call:
         _global_forward_hooks_always_called[handle.id] = True
     return handle
-
-
 def register_module_backward_hook(
     hook: Callable[["Module", _grad_t, _grad_t], Union[None, _grad_t]],
 ) -> RemovableHandle:
-    r"""Register a backward hook common to all the modules.
+    r"""为所有模块注册全局反向传播钩子(已弃用)
 
-    This function is deprecated in favor of
+    注意：此函数已被弃用，推荐使用
     :func:`torch.nn.modules.module.register_module_full_backward_hook`
-    and the behavior of this function will change in future versions.
+    未来版本中此函数的行为可能会改变。
 
-    Returns:
+    返回:
         :class:`torch.utils.hooks.RemovableHandle`:
-            a handle that can be used to remove the added hook by calling
-            ``handle.remove()``
+            可移除句柄，调用``handle.remove()``可删除此钩子
 
     """
     global _global_is_full_backward_hook
+    # 检查是否已存在完整反向钩子的冲突
     if _global_is_full_backward_hook is True:
         raise RuntimeError(
-            "Cannot use both regular backward hooks and full backward hooks as a "
-            "global Module hook. Please use only one of them."
+            "不能同时使用常规反向钩子和完整反向钩子作为全局模块钩子。"
+            "请只选择其中一种使用。"
         )
 
-    _global_is_full_backward_hook = False
+    _global_is_full_backward_hook = False  # 标记为常规反向钩子
 
+    # 创建可移除句柄并添加到全局反向钩子字典
     handle = RemovableHandle(_global_backward_hooks)
     _global_backward_hooks[handle.id] = hook
     return handle
@@ -317,25 +318,24 @@ def register_module_backward_hook(
 def register_module_full_backward_pre_hook(
     hook: Callable[["Module", _grad_t], Union[None, _grad_t]],
 ) -> RemovableHandle:
-    r"""Register a backward pre-hook common to all the modules.
+    r"""为所有模块注册全局完整反向传播预处理钩子
 
     .. warning ::
-        This adds global state to the `nn.module` module
-        and it is only intended for debugging/profiling purposes.
+        警告：这会向`nn.module`模块添加全局状态，
+        且仅用于调试/性能分析目的
 
-    Hooks registered using this function behave in the same way as those
-    registered by :meth:`torch.nn.Module.register_full_backward_pre_hook`.
-    Refer to its documentation for more details.
+    使用此函数注册的钩子行为与
+    :meth:`torch.nn.Module.register_full_backward_pre_hook`注册的钩子相同。
+    详见其文档说明。
 
-    Hooks registered using this function will be called before hooks registered
-    using :meth:`torch.nn.Module.register_full_backward_pre_hook`.
+    此钩子会在通过:meth:`torch.nn.Module.register_full_backward_pre_hook`
+    注册的模块特定钩子之前执行。
 
-    Returns:
+    返回:
         :class:`torch.utils.hooks.RemovableHandle`:
-            a handle that can be used to remove the added hook by calling
-            ``handle.remove()``
-
+            可移除句柄，调用``handle.remove()``可删除此钩子
     """
+    # 创建可移除句柄并添加到全局反向预处理钩子字典
     handle = RemovableHandle(_global_backward_pre_hooks)
     _global_backward_pre_hooks[handle.id] = hook
     return handle
@@ -344,623 +344,558 @@ def register_module_full_backward_pre_hook(
 def register_module_full_backward_hook(
     hook: Callable[["Module", _grad_t, _grad_t], Union[None, _grad_t]],
 ) -> RemovableHandle:
-    r"""Register a backward hook common to all the modules.
+    r"""为所有模块注册全局完整反向传播钩子
 
     .. warning ::
-        This adds global state to the `nn.module` module
-        and it is only intended for debugging/profiling purposes.
+        警告：这会向`nn.module`模块添加全局状态，
+        且仅用于调试/性能分析目的
 
-    Hooks registered using this function behave in the same way as those
-    registered by :meth:`torch.nn.Module.register_full_backward_hook`.
-    Refer to its documentation for more details.
+    使用此函数注册的钩子行为与
+    :meth:`torch.nn.Module.register_full_backward_hook`注册的钩子相同。
+    详见其文档说明。
 
-    Hooks registered using this function will be called before hooks registered
-    using :meth:`torch.nn.Module.register_full_backward_hook`.
+    此钩子会在通过:meth:`torch.nn.Module.register_full_backward_hook`
+    注册的模块特定钩子之前执行。
 
-    Returns:
+    返回:
         :class:`torch.utils.hooks.RemovableHandle`:
-            a handle that can be used to remove the added hook by calling
-            ``handle.remove()``
-
+            可移除句柄，调用``handle.remove()``可删除此钩子
     """
     global _global_is_full_backward_hook
+    # 检查是否已存在常规反向钩子的冲突
     if _global_is_full_backward_hook is False:
         raise RuntimeError(
-            "Cannot use both regular backward hooks and full backward hooks as a "
-            "global Module hook. Please use only one of them."
+            "不能同时使用常规反向钩子和完整反向钩子作为全局模块钩子。"
+            "请只选择其中一种使用。"
         )
 
-    _global_is_full_backward_hook = True
+    _global_is_full_backward_hook = True  # 标记为完整反向钩子
 
+    # 创建可移除句柄并添加到全局反向钩子字典
     handle = RemovableHandle(_global_backward_hooks)
     _global_backward_hooks[handle.id] = hook
     return handle
 
-
-# Trick mypy into not applying contravariance rules to inputs by defining
-# forward as a value, rather than a function.  See also
-# https://github.com/python/mypy/issues/8795
+# 通过将forward定义为值而非函数来绕过mypy的逆变规则检查
+# 另见: https://github.com/python/mypy/issues/8795
 def _forward_unimplemented(self, *input: Any) -> None:
-    r"""Define the computation performed at every call.
+    r"""定义每次调用时执行的计算操作。
 
-    Should be overridden by all subclasses.
+    所有子类都应该重写此方法。
 
     .. note::
-        Although the recipe for forward pass needs to be defined within
-        this function, one should call the :class:`Module` instance afterwards
-        instead of this since the former takes care of running the
-        registered hooks while the latter silently ignores them.
+        虽然前向传递的逻辑需要在此函数中定义，
+        但实际调用时应该使用模块实例(如model(x))而非直接调用此方法，
+        因为前者会执行已注册的钩子而后者会静默忽略它们。
+
+    此方法故意抛出未实现错误，强制子类必须实现forward方法。
     """
     raise NotImplementedError(
-        f'Module [{type(self).__name__}] is missing the required "forward" function'
+        f'模块 [{type(self).__name__}] 缺少必需的 "forward" 方法实现'
     )
 
-
 class Module:
-    r"""Base class for all neural network modules.
+    r"""所有神经网络模块的基类。
 
-    Your models should also subclass this class.
+    你的模型应该继承这个类。
 
-    Modules can also contain other Modules, allowing them to be nested in
-    a tree structure. You can assign the submodules as regular attributes::
-
+    模块可以包含其他模块，形成树状嵌套结构。你可以像常规属性一样分配子模块::
+    
         import torch.nn as nn
         import torch.nn.functional as F
 
         class Model(nn.Module):
             def __init__(self) -> None:
-                super().__init__()
-                self.conv1 = nn.Conv2d(1, 20, 5)
+                super().__init__()  # 必须首先调用父类初始化
+                self.conv1 = nn.Conv2d(1, 20, 5)  # 子模块会自动注册
                 self.conv2 = nn.Conv2d(20, 20, 5)
 
             def forward(self, x):
                 x = F.relu(self.conv1(x))
                 return F.relu(self.conv2(x))
 
-    Submodules assigned in this way will be registered, and will also have their
-    parameters converted when you call :meth:`to`, etc.
+    这样分配的子模块会被自动注册，当调用:meth:`to`等方法时，它们的参数也会被转换。
 
     .. note::
-        As per the example above, an ``__init__()`` call to the parent class
-        must be made before assignment on the child.
+        如上例所示，必须在子类属性分配前调用父类的``__init__()``方法。
 
-    :ivar training: Boolean represents whether this module is in training or
-                    evaluation mode.
+    :ivar training: 布尔值，表示此模块处于训练还是评估模式。
     :vartype training: bool
     """
 
-    dump_patches: bool = False
+    dump_patches: bool = False  # 用于序列化的补丁标记
 
     _version: int = 1
-    r"""This allows better BC support for :meth:`load_state_dict`. In
-    :meth:`state_dict`, the version number will be saved as in the attribute
-    `_metadata` of the returned state dict, and thus pickled. `_metadata` is a
-    dictionary with keys that follow the naming convention of state dict. See
-    ``_load_from_state_dict`` on how to use this information in loading.
+    r"""该版本号支持:meth:`load_state_dict`的更好向后兼容。
+    在:meth:`state_dict`中，版本号会保存在返回状态字典的`_metadata`属性中并被序列化。
+    `_metadata`是一个字典，其键遵循状态字典的命名规范。
+    参见``_load_from_state_dict``了解如何在加载时使用此信息。
 
-    If new parameters/buffers are added/removed from a module, this number shall
-    be bumped, and the module's `_load_from_state_dict` method can compare the
-    version number and do appropriate changes if the state dict is from before
-    the change."""
+    如果模块添加/删除了新参数/缓冲区，应该增加此版本号，
+    模块的`_load_from_state_dict`方法可以比较版本号，
+    如果状态字典来自变更前，可以做出适当的调整。"""
 
-    training: bool
-    _parameters: dict[str, Optional[Parameter]]
-    _buffers: dict[str, Optional[Tensor]]
-    _non_persistent_buffers_set: set[str]
-    _backward_pre_hooks: dict[int, Callable]
-    _backward_hooks: dict[int, Callable]
-    _is_full_backward_hook: Optional[bool]
-    _forward_hooks: dict[int, Callable]
-    # Marks whether the corresponding _forward_hooks accept kwargs or not.
-    # As JIT does not support set[int], this dict is used as a set, where all
-    # hooks represented in this dict accept kwargs.
-    _forward_hooks_with_kwargs: dict[int, bool]
-    # forward hooks that should always be called even if an exception is raised
-    _forward_hooks_always_called: dict[int, bool]
-    _forward_pre_hooks: dict[int, Callable]
-    # Marks whether the corresponding _forward_hooks accept kwargs or not.
-    # As JIT does not support set[int], this dict is used as a set, where all
-    # hooks represented in this dict accept kwargs.
-    _forward_pre_hooks_with_kwargs: dict[int, bool]
-    _state_dict_hooks: dict[int, Callable]
-    _load_state_dict_pre_hooks: dict[int, Callable]
-    _state_dict_pre_hooks: dict[int, Callable]
-    _load_state_dict_post_hooks: dict[int, Callable]
-    _modules: dict[str, Optional["Module"]]
-    call_super_init: bool = False
-    _compiled_call_impl: Optional[Callable] = None
+    # 模块核心状态变量
+    training: bool  # 训练/评估模式标志
+    _parameters: dict[str, Optional[Parameter]]  # 存储所有参数
+    _buffers: dict[str, Optional[Tensor]]  # 存储所有缓冲区
+    _non_persistent_buffers_set: set[str]  # 不持久化的缓冲区集合
+    
+    # 钩子相关存储
+    _backward_pre_hooks: dict[int, Callable]  # 反向传播预处理钩子
+    _backward_hooks: dict[int, Callable]  # 反向传播钩子
+    _is_full_backward_hook: Optional[bool]  # 是否使用完整反向钩子
+    
+    _forward_hooks: dict[int, Callable]  # 前向传播钩子
+    _forward_hooks_with_kwargs: dict[int, bool]  # 接受kwargs的前向钩子标记
+    _forward_hooks_always_called: dict[int, bool]  # 异常时也调用的前向钩子
+    
+    _forward_pre_hooks: dict[int, Callable]  # 前向传播预处理钩子
+    _forward_pre_hooks_with_kwargs: dict[int, bool]  # 接受kwargs的前向预处理钩子
+    
+    # 状态字典相关钩子
+    _state_dict_hooks: dict[int, Callable]  # 状态字典钩子
+    _load_state_dict_pre_hooks: dict[int, Callable]  # 加载状态字典预处理钩子
+    _state_dict_pre_hooks: dict[int, Callable]  # 状态字典预处理钩子
+    _load_state_dict_post_hooks: dict[int, Callable]  # 加载状态字典后处理钩子
+    
+    _modules: dict[str, Optional["Module"]]  # 子模块字典
+    
+    # 其他功能标志
+    call_super_init: bool = False  # 是否调用父类初始化标志
+    _compiled_call_impl: Optional[Callable] = None  # 编译后的调用实现
+    
+def __init__(self, *args, **kwargs) -> None:
+    """初始化Module内部状态，同时被nn.Module和ScriptModule共享"""
+    # 记录API使用情况（仅记录一次）
+    torch._C._log_api_usage_once("python.nn_module")
 
-    def __init__(self, *args, **kwargs) -> None:
-        """Initialize internal Module state, shared by both nn.Module and ScriptModule."""
-        torch._C._log_api_usage_once("python.nn_module")
+    # 向后兼容性处理：当call_super_init=False时不允许任何参数
+    if self.call_super_init is False and bool(kwargs):
+        raise TypeError(
+            f"{type(self).__name__}.__init__() 收到了意外的关键字参数 '{next(iter(kwargs))}'"
+        )
 
-        # Backward compatibility: no args used to be allowed when call_super_init=False
-        if self.call_super_init is False and bool(kwargs):
-            raise TypeError(
-                f"{type(self).__name__}.__init__() got an unexpected keyword argument '{next(iter(kwargs))}'"
-                ""
-            )
+    if self.call_super_init is False and bool(args):
+        raise TypeError(
+            f"{type(self).__name__}.__init__() 需要1个位置参数但收到了 {len(args) + 1} 个"
+        )
 
-        if self.call_super_init is False and bool(args):
-            raise TypeError(
-                f"{type(self).__name__}.__init__() takes 1 positional argument but {len(args) + 1} were"
-                " given"
-            )
+    """
+    使用super().__setattr__()而不是直接属性赋值来避免Module.__setattr__的开销。
+    Module的__setattr__对参数、子模块和缓冲区有特殊处理，对其他属性则直接调用super().__setattr__。
+    """
+    # 初始化所有模块内部状态
+    super().__setattr__("training", True)  # 默认训练模式
+    super().__setattr__("_parameters", {})  # 参数字典
+    super().__setattr__("_buffers", {})  # 缓冲区字典
+    super().__setattr__("_non_persistent_buffers_set", set())  # 非持久化缓冲区集合
+    
+    # 初始化各种钩子容器（使用OrderedDict保持顺序）
+    super().__setattr__("_backward_pre_hooks", OrderedDict())  # 反向预处理钩子
+    super().__setattr__("_backward_hooks", OrderedDict())  # 反向钩子
+    super().__setattr__("_is_full_backward_hook", None)  # 完整反向钩子标记
+    
+    super().__setattr__("_forward_hooks", OrderedDict())  # 前向钩子
+    super().__setattr__("_forward_hooks_with_kwargs", OrderedDict())  # 带kwargs的前向钩子
+    super().__setattr__("_forward_hooks_always_called", OrderedDict())  # 总是调用的前向钩子
+    
+    super().__setattr__("_forward_pre_hooks", OrderedDict())  # 前向预处理钩子
+    super().__setattr__("_forward_pre_hooks_with_kwargs", OrderedDict())  # 带kwargs的前向预处理钩子
+    
+    super().__setattr__("_state_dict_hooks", OrderedDict())  # 状态字典钩子
+    super().__setattr__("_state_dict_pre_hooks", OrderedDict())  # 状态字典预处理钩子
+    super().__setattr__("_load_state_dict_pre_hooks", OrderedDict())  # 加载状态字典预处理钩子
+    super().__setattr__("_load_state_dict_post_hooks", OrderedDict())  # 加载状态字典后处理钩子
+    
+    super().__setattr__("_modules", {})  # 子模块字典
 
-        """
-        Calls super().__setattr__('a', a) instead of the typical self.a = a
-        to avoid Module.__setattr__ overhead. Module's __setattr__ has special
-        handling for parameters, submodules, and buffers but simply calls into
-        super().__setattr__ for all other attributes.
-        """
-        super().__setattr__("training", True)
-        super().__setattr__("_parameters", {})
-        super().__setattr__("_buffers", {})
-        super().__setattr__("_non_persistent_buffers_set", set())
-        super().__setattr__("_backward_pre_hooks", OrderedDict())
-        super().__setattr__("_backward_hooks", OrderedDict())
-        super().__setattr__("_is_full_backward_hook", None)
-        super().__setattr__("_forward_hooks", OrderedDict())
-        super().__setattr__("_forward_hooks_with_kwargs", OrderedDict())
-        super().__setattr__("_forward_hooks_always_called", OrderedDict())
-        super().__setattr__("_forward_pre_hooks", OrderedDict())
-        super().__setattr__("_forward_pre_hooks_with_kwargs", OrderedDict())
-        super().__setattr__("_state_dict_hooks", OrderedDict())
-        super().__setattr__("_state_dict_pre_hooks", OrderedDict())
-        super().__setattr__("_load_state_dict_pre_hooks", OrderedDict())
-        super().__setattr__("_load_state_dict_post_hooks", OrderedDict())
-        super().__setattr__("_modules", {})
+    # 如果设置了call_super_init标志，调用父类初始化
+    if self.call_super_init:
+        super().__init__(*args, **kwargs)
 
-        if self.call_super_init:
-            super().__init__(*args, **kwargs)
-
+    # 将forward设置为未实现的默认方法
     forward: Callable[..., Any] = _forward_unimplemented
 
     def register_buffer(
-        self, name: str, tensor: Optional[Tensor], persistent: bool = True
-    ) -> None:
-        r"""Add a buffer to the module.
+            self, name: str, tensor: Optional[Tensor], persistent: bool = True
+        ) -> None:
+        r"""向模块注册缓冲区(buffer)。
 
-        This is typically used to register a buffer that should not to be
-        considered a model parameter. For example, BatchNorm's ``running_mean``
-        is not a parameter, but is part of the module's state. Buffers, by
-        default, are persistent and will be saved alongside parameters. This
-        behavior can be changed by setting :attr:`persistent` to ``False``. The
-        only difference between a persistent buffer and a non-persistent buffer
-        is that the latter will not be a part of this module's
-        :attr:`state_dict`.
+        通常用于注册不应被视为模型参数的缓冲区。例如BatchNorm的`running_mean`不是参数，
+        但是模块状态的一部分。缓冲区默认是持久化的(persistent)，会与参数一起保存。
+        可以通过设置`persistent=False`来改变此行为。持久化和非持久化缓冲区的唯一区别是
+        后者不会包含在模块的`state_dict`中。
 
-        Buffers can be accessed as attributes using given names.
+        缓冲区可以通过给定的名称作为属性访问。
 
-        Args:
-            name (str): name of the buffer. The buffer can be accessed
-                from this module using the given name
-            tensor (Tensor or None): buffer to be registered. If ``None``, then operations
-                that run on buffers, such as :attr:`cuda`, are ignored. If ``None``,
-                the buffer is **not** included in the module's :attr:`state_dict`.
-            persistent (bool): whether the buffer is part of this module's
-                :attr:`state_dict`.
+        参数:
+            name (str): 缓冲区名称。可以通过此名称从模块访问缓冲区
+            tensor (Tensor or None): 要注册的缓冲区。如果是None，则对缓冲区的操作
+                (如`cuda`)会被忽略。如果是None，缓冲区**不会**包含在模块的`state_dict`中
+            persistent (bool): 缓冲区是否是模块`state_dict`的一部分
 
-        Example::
-
-            >>> # xdoctest: +SKIP("undefined vars")
+        示例::
             >>> self.register_buffer('running_mean', torch.zeros(num_features))
-
         """
+        # 检查ScriptModule不支持非持久化缓冲区
         if persistent is False and isinstance(self, torch.jit.ScriptModule):
-            raise RuntimeError("ScriptModule does not support non-persistent buffers")
+            raise RuntimeError("ScriptModule不支持非持久化缓冲区")
 
+        # 参数有效性检查
         if "_buffers" not in self.__dict__:
-            raise AttributeError("cannot assign buffer before Module.__init__() call")
+            raise AttributeError("必须在Module.__init__()调用后才能注册缓冲区")
         elif not isinstance(name, str):
-            raise TypeError(
-                f"buffer name should be a string. Got {torch.typename(name)}"
-            )
+            raise TypeError(f"缓冲区名称必须是字符串，得到 {torch.typename(name)}")
         elif "." in name:
-            raise KeyError('buffer name can\'t contain "."')
+            raise KeyError('缓冲区名称不能包含"."')
         elif name == "":
-            raise KeyError('buffer name can\'t be empty string ""')
+            raise KeyError('缓冲区名称不能为空字符串""')
         elif hasattr(self, name) and name not in self._buffers:
-            raise KeyError(f"attribute '{name}' already exists")
+            raise KeyError(f"属性'{name}'已存在")
         elif tensor is not None and not isinstance(tensor, torch.Tensor):
             raise TypeError(
-                f"cannot assign '{torch.typename(tensor)}' object to buffer '{name}' "
-                "(torch Tensor or None required)"
+                f"不能将'{torch.typename(tensor)}'对象赋值给缓冲区'{name}'"
+                "(需要torch.Tensor或None)"
             )
+        
+        # 执行全局缓冲区注册钩子
+        for hook in _global_buffer_registration_hooks.values():
+            output = hook(self, name, tensor)
+            if output is not None:
+                tensor = output
+        
+        # 注册缓冲区
+        self._buffers[name] = tensor
+        if persistent:
+            self._non_persistent_buffers_set.discard(name)  # 从非持久化集合中移除
         else:
-            for hook in _global_buffer_registration_hooks.values():
-                output = hook(self, name, tensor)
-                if output is not None:
-                    tensor = output
-            self._buffers[name] = tensor
-            if persistent:
-                self._non_persistent_buffers_set.discard(name)
+            self._non_persistent_buffers_set.add(name)  # 添加到非持久化集合
+
+        def register_parameter(self, name: str, param: Optional[Parameter]) -> None:
+            r"""向模块注册参数。
+
+            参数可以通过给定的名称作为属性访问。
+
+            参数:
+                name (str): 参数名称。可以通过此名称从模块访问参数
+                param (Parameter or None): 要添加到模块的参数。如果是None，
+                    则对参数的操作(如`cuda`)会被忽略。如果是None，参数**不会**
+                    包含在模块的`state_dict`中。
+            """
+            # 参数有效性检查
+            if "_parameters" not in self.__dict__:
+                raise AttributeError("必须在Module.__init__()调用后才能注册参数")
+            elif not isinstance(name, str):
+                raise TypeError(f"参数名称必须是字符串，得到 {torch.typename(name)}")
+            elif "." in name:
+                raise KeyError('参数名称不能包含"."')
+            elif name == "":
+                raise KeyError('参数名称不能为空字符串""')
+            elif hasattr(self, name) and name not in self._parameters:
+                raise KeyError(f"属性'{name}'已存在")
+
+            if param is None:
+                self._parameters[name] = None
+            elif not isinstance(param, Parameter):
+                raise TypeError(
+                    f"不能将'{torch.typename(param)}'对象赋值给参数'{name}'"
+                    "(需要torch.nn.Parameter或None)"
+                )
+            elif param.grad_fn:
+                raise ValueError(
+                    f"不能将非叶子Tensor赋值给参数'{name}'。模型参数必须显式创建。"
+                    f"如果要将'{name}'表示为另一个Tensor的函数，请在forward()方法中计算其值。"
+                )
             else:
-                self._non_persistent_buffers_set.add(name)
-
-    def register_parameter(self, name: str, param: Optional[Parameter]) -> None:
-        r"""Add a parameter to the module.
-
-        The parameter can be accessed as an attribute using given name.
-
-        Args:
-            name (str): name of the parameter. The parameter can be accessed
-                from this module using the given name
-            param (Parameter or None): parameter to be added to the module. If
-                ``None``, then operations that run on parameters, such as :attr:`cuda`,
-                are ignored. If ``None``, the parameter is **not** included in the
-                module's :attr:`state_dict`.
-        """
-        if "_parameters" not in self.__dict__:
-            raise AttributeError(
-                "cannot assign parameter before Module.__init__() call"
-            )
-
-        elif not isinstance(name, str):
-            raise TypeError(
-                f"parameter name should be a string. Got {torch.typename(name)}"
-            )
-        elif "." in name:
-            raise KeyError('parameter name can\'t contain "."')
-        elif name == "":
-            raise KeyError('parameter name can\'t be empty string ""')
-        elif hasattr(self, name) and name not in self._parameters:
-            raise KeyError(f"attribute '{name}' already exists")
-
-        if param is None:
-            self._parameters[name] = None
-        elif not isinstance(param, Parameter):
-            raise TypeError(
-                f"cannot assign '{torch.typename(param)}' object to parameter '{name}' "
-                "(torch.nn.Parameter or None required)"
-            )
-        elif param.grad_fn:
-            raise ValueError(
-                f"Cannot assign non-leaf Tensor to parameter '{name}'. Model "
-                f"parameters must be created explicitly. To express '{name}' "
-                "as a function of another Tensor, compute the value in "
-                "the forward() method."
-            )
-        else:
-            for hook in _global_parameter_registration_hooks.values():
-                output = hook(self, name, param)
-                if output is not None:
-                    param = output
-            self._parameters[name] = param
+                # 执行全局参数注册钩子
+                for hook in _global_parameter_registration_hooks.values():
+                    output = hook(self, name, param)
+                    if output is not None:
+                        param = output
+                self._parameters[name] = param
 
     def add_module(self, name: str, module: Optional["Module"]) -> None:
-        r"""Add a child module to the current module.
-
-        The module can be accessed as an attribute using the given name.
-
-        Args:
-            name (str): name of the child module. The child module can be
-                accessed from this module using the given name
-            module (Module): child module to be added to the module.
+        r"""向当前模块添加子模块
+        
+        可以通过给定名称作为属性访问该模块
+        
+        参数:
+            name (str): 子模块名称。可以通过该名称从当前模块访问子模块
+            module (Module): 要添加到模块的子模块
         """
+        # 检查模块类型有效性
         if not isinstance(module, Module) and module is not None:
-            raise TypeError(f"{torch.typename(module)} is not a Module subclass")
+            raise TypeError(f"{torch.typename(module)} 不是Module子类")
+        # 检查名称类型有效性
         elif not isinstance(name, str):
-            raise TypeError(
-                f"module name should be a string. Got {torch.typename(name)}"
-            )
+            raise TypeError(f"模块名称应为字符串，实际得到 {torch.typename(name)}")
+        # 检查名称是否已被占用
         elif hasattr(self, name) and name not in self._modules:
-            raise KeyError(f"attribute '{name}' already exists")
+            raise KeyError(f"属性 '{name}' 已存在")
+        # 检查名称格式有效性
         elif "." in name:
-            raise KeyError(f'module name can\'t contain ".", got: {name}')
+            raise KeyError(f'模块名称不能包含"."，实际得到: {name}')
         elif name == "":
-            raise KeyError('module name can\'t be empty string ""')
+            raise KeyError('模块名称不能为空字符串""')
+        
+        # 执行全局模块注册钩子
         for hook in _global_module_registration_hooks.values():
             output = hook(self, name, module)
             if output is not None:
                 module = output
+        
+        # 将模块添加到内部字典
         self._modules[name] = module
 
     def register_module(self, name: str, module: Optional["Module"]) -> None:
-        r"""Alias for :func:`add_module`."""
+        r"""add_module的别名方法"""
         self.add_module(name, module)
 
     def get_submodule(self, target: str) -> "Module":
-        """Return the submodule given by ``target`` if it exists, otherwise throw an error.
-
-        For example, let's say you have an ``nn.Module`` ``A`` that
-        looks like this:
-
-        .. code-block:: text
-
-            A(
-                (net_b): Module(
-                    (net_c): Module(
-                        (conv): Conv2d(16, 33, kernel_size=(3, 3), stride=(2, 2))
-                    )
-                    (linear): Linear(in_features=100, out_features=200, bias=True)
-                )
-            )
-
-        (The diagram shows an ``nn.Module`` ``A``. ``A`` which has a nested
-        submodule ``net_b``, which itself has two submodules ``net_c``
-        and ``linear``. ``net_c`` then has a submodule ``conv``.)
-
-        To check whether or not we have the ``linear`` submodule, we
-        would call ``get_submodule("net_b.linear")``. To check whether
-        we have the ``conv`` submodule, we would call
-        ``get_submodule("net_b.net_c.conv")``.
-
-        The runtime of ``get_submodule`` is bounded by the degree
-        of module nesting in ``target``. A query against
-        ``named_modules`` achieves the same result, but it is O(N) in
-        the number of transitive modules. So, for a simple check to see
-        if some submodule exists, ``get_submodule`` should always be
-        used.
-
-        Args:
-            target: The fully-qualified string name of the submodule
-                to look for. (See above example for how to specify a
-                fully-qualified string.)
-
-        Returns:
-            torch.nn.Module: The submodule referenced by ``target``
-
-        Raises:
-            AttributeError: If at any point along the path resulting from
-                the target string the (sub)path resolves to a non-existent
-                attribute name or an object that is not an instance of ``nn.Module``.
+        """根据target路径获取子模块，不存在则抛出错误
+        
+        示例:
+            对于模块结构A(net_b(net_c(conv), linear))，
+            获取linear子模块: get_submodule("net_b.linear")
+            获取conv子模块: get_submodule("net_b.net_c.conv")
+            
+        参数:
+            target: 子模块的完整路径字符串
+            
+        返回:
+            torch.nn.Module: target对应的子模块
+            
+        异常:
+            AttributeError: 当路径中任何部分不存在或不是nn.Module实例时抛出
         """
         if target == "":
             return self
-
+        
+        # 分割路径为原子部分
         atoms: list[str] = target.split(".")
         mod: torch.nn.Module = self
-
+        
+        # 逐级查找子模块
         for item in atoms:
             if not hasattr(mod, item):
-                raise AttributeError(
-                    mod._get_name() + " has no attribute `" + item + "`"
-                )
-
+                raise AttributeError(mod._get_name() + " 没有属性 `" + item + "`")
+            
             mod = getattr(mod, item)
-
+            
             if not isinstance(mod, torch.nn.Module):
-                raise AttributeError("`" + item + "` is not an nn.Module")
-
+                raise AttributeError("`" + item + "` 不是nn.Module")
+        
         return mod
+
 
     def set_submodule(
         self, target: str, module: "Module", strict: bool = False
     ) -> None:
         """
-        Set the submodule given by ``target`` if it exists, otherwise throw an error.
-
-        .. note::
-            If ``strict`` is set to ``False`` (default), the method will replace an existing submodule
-            or create a new submodule if the parent module exists. If ``strict`` is set to ``True``,
-            the method will only attempt to replace an existing submodule and throw an error if
-            the submodule does not exist.
-
-        For example, let's say you have an ``nn.Module`` ``A`` that
-        looks like this:
-
-        .. code-block:: text
-
-            A(
-                (net_b): Module(
-                    (net_c): Module(
-                        (conv): Conv2d(3, 3, 3)
-                    )
-                    (linear): Linear(3, 3)
-                )
-            )
-
-        (The diagram shows an ``nn.Module`` ``A``. ``A`` has a nested
-        submodule ``net_b``, which itself has two submodules ``net_c``
-        and ``linear``. ``net_c`` then has a submodule ``conv``.)
-
-        To override the ``Conv2d`` with a new submodule ``Linear``, you
-        could call ``set_submodule("net_b.net_c.conv", nn.Linear(1, 1))``
-        where ``strict`` could be ``True`` or ``False``
-
-        To add a new submodule ``Conv2d`` to the existing ``net_b`` module,
-        you would call ``set_submodule("net_b.conv", nn.Conv2d(1, 1, 1))``.
-
-        In the above if you set ``strict=True`` and call
-        ``set_submodule("net_b.conv", nn.Conv2d(1, 1, 1), strict=True)``, an AttributeError
-        will be raised because ``net_b`` does not have a submodule named ``conv``.
-
-        Args:
-            target: The fully-qualified string name of the submodule
-                to look for. (See above example for how to specify a
-                fully-qualified string.)
-            module: The module to set the submodule to.
-            strict: If ``False``, the method will replace an existing submodule
-                or create a new submodule if the parent module exists. If ``True``,
-                the method will only attempt to replace an existing submodule and throw an error
-                if the submodule doesn't already exist.
-
-        Raises:
-            ValueError: If the ``target`` string is empty or if ``module`` is not an instance of ``nn.Module``.
-            AttributeError: If at any point along the path resulting from
-                the ``target`` string the (sub)path resolves to a non-existent
-                attribute name or an object that is not an instance of ``nn.Module``.
+        设置或替换指定路径的子模块
+        
+        参数:
+            target: 子模块的完整路径字符串（如"net_b.net_c.conv"）
+            module: 要设置的模块对象
+            strict: 严格模式标志。False时允许创建新子模块，True时仅允许替换现有子模块
+            
+        异常:
+            ValueError: 当target为空或module不是nn.Module实例时抛出
+            AttributeError: 当路径不存在或路径对象不是nn.Module时抛出
         """
+        # 检查target非空
         if target == "":
-            raise ValueError("Cannot set the submodule without a target name!")
-
+            raise ValueError("必须提供目标子模块名称！")
+        
+        # 分割路径为原子部分
         atoms: list[str] = target.split(".")
+        # 验证模块类型
         if not isinstance(module, torch.nn.Module):
             raise ValueError(
-                "`" + "module" + f"` is not an nn.Module, found {type(module)}"
+                f"`module`不是nn.Module类型，实际类型为{type(module)}"
             )
-        if len(atoms) == 1:
+        
+        # 获取父模块
+        if len(atoms) == 1:  # 目标为直接子模块
             parent: torch.nn.Module = self
-        else:
+        else:  # 目标为嵌套子模块
             parent_key = ".".join(atoms[:-1])
             parent = self.get_submodule(parent_key)
-
+        
+        # 严格模式检查
         if strict and not hasattr(parent, atoms[-1]):
             raise AttributeError(
-                parent._get_name() + " has no attribute `" + atoms[-1] + "`"
+                f"{parent._get_name()} 没有属性 `{atoms[-1]}`"
             )
+        
+        # 检查现有属性类型
         if hasattr(parent, atoms[-1]):
             mod = getattr(parent, atoms[-1])
             if not isinstance(mod, torch.nn.Module):
-                raise AttributeError("`" + atoms[-1] + "` is not an nn.Module")
+                raise AttributeError(f"`{atoms[-1]}` 不是nn.Module")
+        
+        # 设置新模块
         setattr(parent, atoms[-1], module)
-
     def get_parameter(self, target: str) -> "Parameter":
-        """Return the parameter given by ``target`` if it exists, otherwise throw an error.
-
-        See the docstring for ``get_submodule`` for a more detailed
-        explanation of this method's functionality as well as how to
-        correctly specify ``target``.
-
-        Args:
-            target: The fully-qualified string name of the Parameter
-                to look for. (See ``get_submodule`` for how to specify a
-                fully-qualified string.)
-
-        Returns:
-            torch.nn.Parameter: The Parameter referenced by ``target``
-
-        Raises:
-            AttributeError: If the target string references an invalid
-                path or resolves to something that is not an
-                ``nn.Parameter``
+        """根据路径字符串获取模块参数
+        
+        参数:
+            target: 参数的完整路径字符串（如"net.conv.weight"）
+            
+        返回:
+            torch.nn.Parameter: 目标参数对象
+            
+        异常:
+            AttributeError: 当路径无效或目标不是Parameter时抛出
         """
+        # 分割路径为模块路径和参数名
         module_path, _, param_name = target.rpartition(".")
-
+        
+        # 获取参数所在模块
         mod: torch.nn.Module = self.get_submodule(module_path)
-
+        
+        # 检查参数是否存在
         if not hasattr(mod, param_name):
             raise AttributeError(
-                mod._get_name() + " has no attribute `" + param_name + "`"
+                f"{mod._get_name()} 没有属性 `{param_name}`"
             )
-
+        
+        # 获取参数对象
         param: torch.nn.Parameter = getattr(mod, param_name)
-
+        
+        # 验证参数类型
         if not isinstance(param, torch.nn.Parameter):
-            raise AttributeError("`" + param_name + "` is not an nn.Parameter")
-
+            raise AttributeError(f"`{param_name}` 不是nn.Parameter类型")
+        
         return param
 
+
     def get_buffer(self, target: str) -> "Tensor":
-        """Return the buffer given by ``target`` if it exists, otherwise throw an error.
+        """根据给定的target返回对应的buffer，如果不存在则抛出错误。
 
-        See the docstring for ``get_submodule`` for a more detailed
-        explanation of this method's functionality as well as how to
-        correctly specify ``target``.
+        关于此方法功能的更详细说明以及如何正确指定target，
+        请参阅``get_submodule``的文档字符串。
 
-        Args:
-            target: The fully-qualified string name of the buffer
-                to look for. (See ``get_submodule`` for how to specify a
-                fully-qualified string.)
+        参数:
+            target: 要查找的buffer的完全限定字符串名称。
+                （关于如何指定完全限定字符串，请参考``get_submodule``）
 
-        Returns:
-            torch.Tensor: The buffer referenced by ``target``
+        返回:
+            torch.Tensor: target引用的buffer
 
-        Raises:
-            AttributeError: If the target string references an invalid
-                path or resolves to something that is not a
-                buffer
+        抛出:
+            AttributeError: 如果target字符串引用了一个无效路径，
+                或者解析到的对象不是一个buffer
         """
+        # 从target字符串中分割出模块路径和buffer名称
         module_path, _, buffer_name = target.rpartition(".")
 
+        # 获取对应的子模块
         mod: torch.nn.Module = self.get_submodule(module_path)
 
+        # 检查模块是否有该属性
         if not hasattr(mod, buffer_name):
             raise AttributeError(
-                mod._get_name() + " has no attribute `" + buffer_name + "`"
+                mod._get_name() + " 没有属性 `" + buffer_name + "`"
             )
 
+        # 获取属性值
         buffer: torch.Tensor = getattr(mod, buffer_name)
 
+        # 验证该属性确实是buffer
         if buffer_name not in mod._buffers:
-            raise AttributeError("`" + buffer_name + "` is not a buffer")
+            raise AttributeError("`" + buffer_name + "` 不是一个buffer")
 
         return buffer
 
     def get_extra_state(self) -> Any:
-        """Return any extra state to include in the module's state_dict.
+        """返回要包含在模块state_dict中的额外状态。
+        
+        如果你的模块需要存储额外状态，请实现此方法和对应的:func:`set_extra_state`。
+        当构建模块的`state_dict()`时会调用此方法。
 
-        Implement this and a corresponding :func:`set_extra_state` for your module
-        if you need to store extra state. This function is called when building the
-        module's `state_dict()`.
+        注意额外状态必须是可pickle的，以确保state_dict可以正确序列化。
+        我们只保证对Tensor的序列化提供向后兼容性；
+        其他对象如果其序列化的pickle形式发生变化，可能会破坏向后兼容性。
 
-        Note that extra state should be picklable to ensure working serialization
-        of the state_dict. We only provide backwards compatibility guarantees
-        for serializing Tensors; other objects may break backwards compatibility if
-        their serialized pickled form changes.
-
-        Returns:
-            object: Any extra state to store in the module's state_dict
+        返回:
+            object: 要存储在模块state_dict中的任何额外状态
         """
         raise RuntimeError(
-            "Reached a code path in Module.get_extra_state() that should never be called. "
-            "Please file an issue at https://github.com/pytorch/pytorch/issues/new?template=bug-report.yml "
-            "to report this bug."
+            "调用了Module.get_extra_state()中不应被调用的代码路径。"
+            "请前往 https://github.com/pytorch/pytorch/issues/new?template=bug-report.yml "
+            "提交issue报告此错误。"
         )
 
     def set_extra_state(self, state: Any) -> None:
-        """Set extra state contained in the loaded `state_dict`.
+        """设置从加载的`state_dict`中获取的额外状态。
+        
+        当从:func:`load_state_dict`中加载时，会调用此函数来处理state_dict中的任何额外状态。
+        如果你的模块需要在state_dict中存储额外状态，请实现此函数和对应的:func:`get_extra_state`。
 
-        This function is called from :func:`load_state_dict` to handle any extra state
-        found within the `state_dict`. Implement this function and a corresponding
-        :func:`get_extra_state` for your module if you need to store extra state within its
-        `state_dict`.
-
-        Args:
-            state (dict): Extra state from the `state_dict`
+        参数:
+            state (dict): 来自`state_dict`的额外状态
         """
         raise RuntimeError(
-            "Reached a code path in Module.set_extra_state() that should never be called. "
-            "Please file an issue at https://github.com/pytorch/pytorch/issues/new?template=bug-report.yml "
-            "to report this bug."
+            "调用了Module.set_extra_state()中不应被调用的代码路径。"
+            "请前往 https://github.com/pytorch/pytorch/issues/new?template=bug-report.yml "
+            "提交issue报告此错误。"
         )
-
     def _apply(self, fn, recurse=True):
+        """对模块及其子模块应用函数fn
+        
+        Args:
+            fn: 要应用的函数
+            recurse: 是否递归应用到子模块，默认为True
+        """
+        # 如果recurse为True，递归地对所有子模块应用fn
         if recurse:
             for module in self.children():
                 module._apply(fn)
 
         def compute_should_use_set_data(tensor, tensor_applied):
+            """判断是否应该使用.data赋值方式更新张量
+            
+            根据新旧张量的类型兼容性和全局设置决定更新方式
+            """
             if torch._has_compatible_shallow_copy_type(tensor, tensor_applied):
-                # If the new tensor has compatible tensor type as the existing tensor,
-                # the current behavior is to change the tensor in-place using `.data =`,
-                # and the future behavior is to overwrite the existing tensor. However,
-                # changing the current behavior is a BC-breaking change, and we want it
-                # to happen in future releases. So for now we introduce the
-                # `torch.__future__.get_overwrite_module_params_on_conversion()`
-                # global flag to let the user control whether they want the future
-                # behavior of overwriting the existing tensor or not.
+                # 如果新张量与现有张量类型兼容
+                # 根据全局设置决定是否使用.data赋值方式(未来会改为直接覆盖)
                 return not torch.__future__.get_overwrite_module_params_on_conversion()
             else:
                 return False
 
+        # 获取是否应该使用swap_tensors方式的全局设置
         should_use_swap_tensors = (
             torch.__future__.get_swap_module_params_on_conversion()
         )
 
+        # 处理所有参数
         for key, param in self._parameters.items():
             if param is None:
                 continue
-            # Tensors stored in modules are graph leaves, and we don't want to
-            # track autograd history of `param_applied`, so we have to use
-            # `with torch.no_grad():`
+                
+            # 不追踪梯度历史地应用fn到参数
             with torch.no_grad():
                 param_applied = fn(param)
+                
+            # 判断是否应该使用.data赋值方式
             p_should_use_set_data = compute_should_use_set_data(param, param_applied)
 
-            # subclasses may have multiple child tensors so we need to use swap_tensors
+            # 判断是否应该使用swap_tensors方式(全局设置或参数是traceable子类)
             p_should_use_swap_tensors = (
                 should_use_swap_tensors or is_traceable_wrapper_subclass(param_applied)
             )
 
             param_grad = param.grad
             if p_should_use_swap_tensors:
+                # 使用swap_tensors方式交换参数
                 try:
                     if param_grad is not None:
-                        # Accessing param.grad makes its at::Tensor's use_count 2, which will prevent swapping.
-                        # Decrement use count of the gradient by setting to None
+                        # 清除梯度以便交换
                         param.grad = None
+                    # 创建新参数并交换
                     param_applied = torch.nn.Parameter(
                         param_applied, requires_grad=param.requires_grad
                     )
@@ -973,14 +908,17 @@ class Module:
                     ) from e
                 out_param = param
             elif p_should_use_set_data:
+                # 使用.data赋值方式更新参数
                 param.data = param_applied
                 out_param = param
             else:
+                # 创建新参数对象替换原参数
                 assert isinstance(param, Parameter)
                 assert param.is_leaf
                 out_param = Parameter(param_applied, param.requires_grad)
                 self._parameters[key] = out_param
 
+            # 处理参数的梯度
             if param_grad is not None:
                 with torch.no_grad():
                     grad_applied = fn(param_grad)
@@ -988,6 +926,7 @@ class Module:
                     param_grad, grad_applied
                 )
                 if p_should_use_swap_tensors:
+                    # 使用swap_tensors方式交换梯度
                     grad_applied.requires_grad_(param_grad.requires_grad)
                     try:
                         torch.utils.swap_tensors(param_grad, grad_applied)
@@ -997,42 +936,42 @@ class Module:
                         ) from e
                     out_param.grad = param_grad
                 elif g_should_use_set_data:
+                    # 使用.data赋值方式更新梯度
                     assert out_param.grad is not None
                     out_param.grad.data = grad_applied
                 else:
+                    # 创建新梯度对象
                     assert param_grad.is_leaf
                     out_param.grad = grad_applied.requires_grad_(
                         param_grad.requires_grad
                     )
 
+        # 处理所有buffer
         for key, buf in self._buffers.items():
             if buf is not None:
                 self._buffers[key] = fn(buf)
 
         return self
-
     def apply(self: T, fn: Callable[["Module"], None]) -> T:
-        r"""Apply ``fn`` recursively to every submodule (as returned by ``.children()``) as well as self.
-
-        Typical use includes initializing the parameters of a model
-        (see also :ref:`nn-init-doc`).
+        """递归地对所有子模块及自身应用函数fn
+        
+        典型用途包括初始化模型参数(参见:ref:`nn-init-doc`)
 
         Args:
-            fn (:class:`Module` -> None): function to be applied to each submodule
+            fn (Callable[[Module], None]): 要应用于每个子模块的函数
 
         Returns:
-            Module: self
+            Module: 返回self以支持链式调用
 
-        Example::
-
-            >>> @torch.no_grad()
+        示例::
+            >>> @torch.no_grad()  # 通常不需要梯度追踪
             >>> def init_weights(m):
-            >>>     print(m)
-            >>>     if type(m) == nn.Linear:
-            >>>         m.weight.fill_(1.0)
-            >>>         print(m.weight)
+            >>>     print(m)  # 打印当前模块
+            >>>     if type(m) == nn.Linear:  # 只处理Linear层
+            >>>         m.weight.fill_(1.0)  # 权重初始化为1
+            >>>         print(m.weight)  # 打印初始化后的权重
             >>> net = nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 2))
-            >>> net.apply(init_weights)
+            >>> net.apply(init_weights)  # 应用初始化函数
             Linear(in_features=2, out_features=2, bias=True)
             Parameter containing:
             tensor([[1., 1.],
@@ -1042,177 +981,194 @@ class Module:
             tensor([[1., 1.],
                     [1., 1.]], requires_grad=True)
             Sequential(
-              (0): Linear(in_features=2, out_features=2, bias=True)
-              (1): Linear(in_features=2, out_features=2, bias=True)
+            (0): Linear(in_features=2, out_features=2, bias=True)
+            (1): Linear(in_features=2, out_features=2, bias=True)
             )
-
         """
+        # 递归地对所有子模块应用fn
         for module in self.children():
             module.apply(fn)
+        # 最后对自身应用fn
         fn(self)
-        return self
+        return self  # 返回self支持链式调用
 
     def cuda(self: T, device: Optional[Union[int, device]] = None) -> T:
-        r"""Move all model parameters and buffers to the GPU.
+        """将所有模型参数和缓冲区移动到GPU
+        
+        这会使关联的参数和缓冲区成为不同的对象，因此如果模块将在GPU上优化，
+        应在构建优化器之前调用此方法。
 
-        This also makes associated parameters and buffers different objects. So
-        it should be called before constructing the optimizer if the module will
-        live on GPU while being optimized.
-
-        .. note::
-            This method modifies the module in-place.
+        注意:
+            此方法会就地(in-place)修改模块。
 
         Args:
-            device (int, optional): if specified, all parameters will be
-                copied to that device
+            device (int, optional): 如果指定，所有参数将被复制到该设备
 
         Returns:
             Module: self
         """
+        # 使用_apply方法并传入lambda函数实现CUDA转移
         return self._apply(lambda t: t.cuda(device))
-
     def ipu(self: T, device: Optional[Union[int, device]] = None) -> T:
-        r"""Move all model parameters and buffers to the IPU.
+        """将所有模型参数和缓冲区移动到IPU设备
+        
+        这会使关联的参数和缓冲区成为不同的对象，因此如果模块将在IPU上优化，
+        应在构建优化器之前调用此方法。
 
-        This also makes associated parameters and buffers different objects. So
-        it should be called before constructing the optimizer if the module will
-        live on IPU while being optimized.
+        注意:
+            此方法会就地(in-place)修改模块。
 
-        .. note::
-            This method modifies the module in-place.
+        参数:
+            device (int, optional): 如果指定，所有参数将被复制到该设备
 
-        Arguments:
-            device (int, optional): if specified, all parameters will be
-                copied to that device
-
-        Returns:
-            Module: self
+        返回:
+            Module: 返回self以支持链式调用
         """
+        # 使用_apply方法并传入lambda函数实现IPU转移
         return self._apply(lambda t: t.ipu(device))
 
     def xpu(self: T, device: Optional[Union[int, device]] = None) -> T:
-        r"""Move all model parameters and buffers to the XPU.
+        """将所有模型参数和缓冲区移动到XPU设备
+        
+        这会使关联的参数和缓冲区成为不同的对象，因此如果模块将在XPU上优化，
+        应在构建优化器之前调用此方法。
 
-        This also makes associated parameters and buffers different objects. So
-        it should be called before constructing optimizer if the module will
-        live on XPU while being optimized.
+        注意:
+            此方法会就地(in-place)修改模块。
 
-        .. note::
-            This method modifies the module in-place.
+        参数:
+            device (int, optional): 如果指定，所有参数将被复制到该设备
 
-        Arguments:
-            device (int, optional): if specified, all parameters will be
-                copied to that device
-
-        Returns:
-            Module: self
+        返回:
+            Module: 返回self以支持链式调用
         """
+        # 使用_apply方法并传入lambda函数实现XPU转移
         return self._apply(lambda t: t.xpu(device))
 
     def mtia(self: T, device: Optional[Union[int, device]] = None) -> T:
-        r"""Move all model parameters and buffers to the MTIA.
+        """将所有模型参数和缓冲区移动到MTIA设备
+        
+        这会使关联的参数和缓冲区成为不同的对象，因此如果模块将在MTIA上优化，
+        应在构建优化器之前调用此方法。
 
-        This also makes associated parameters and buffers different objects. So
-        it should be called before constructing the optimizer if the module will
-        live on MTIA while being optimized.
+        注意:
+            此方法会就地(in-place)修改模块。
 
-        .. note::
-            This method modifies the module in-place.
+        参数:
+            device (int, optional): 如果指定，所有参数将被复制到该设备
 
-        Arguments:
-            device (int, optional): if specified, all parameters will be
-                copied to that device
-
-        Returns:
-            Module: self
+        返回:
+            Module: 返回self以支持链式调用
         """
+        # 使用_apply方法并传入lambda函数实现MTIA转移
         return self._apply(lambda t: t.mtia(device))
 
     def cpu(self: T) -> T:
-        r"""Move all model parameters and buffers to the CPU.
+        """将所有模型参数和缓冲区移动到CPU
+        
+        注意:
+            此方法会就地(in-place)修改模块。
 
-        .. note::
-            This method modifies the module in-place.
-
-        Returns:
-            Module: self
+        返回:
+            Module: 返回self以支持链式调用
         """
+        # 使用_apply方法并传入lambda函数实现CPU转移
         return self._apply(lambda t: t.cpu())
-
+    
     def type(self: T, dst_type: Union[dtype, str]) -> T:
-        r"""Casts all parameters and buffers to :attr:`dst_type`.
+        """将所有参数和缓冲区转换为指定类型
+        
+        注意：
+            此方法会就地(in-place)修改模块。
 
-        .. note::
-            This method modifies the module in-place.
+        参数：
+            dst_type (type或str): 目标数据类型（如torch.float32或'float32'）
 
-        Args:
-            dst_type (type or string): the desired type
-
-        Returns:
-            Module: self
+        返回：
+            Module: 返回self以支持链式调用
         """
+        # 使用_apply方法对所有张量应用类型转换
         return self._apply(lambda t: t.type(dst_type))
 
     def float(self: T) -> T:
-        r"""Casts all floating point parameters and buffers to ``float`` datatype.
+        """将所有浮点参数和缓冲区转换为float32类型
+        
+        注意：
+            1. 只影响浮点类型张量
+            2. 此方法会就地修改模块
 
-        .. note::
-            This method modifies the module in-place.
-
-        Returns:
-            Module: self
+        返回：
+            Module: 返回self以支持链式调用
         """
+        # 条件转换：仅对浮点类型张量执行float()操作
         return self._apply(lambda t: t.float() if t.is_floating_point() else t)
 
     def double(self: T) -> T:
-        r"""Casts all floating point parameters and buffers to ``double`` datatype.
+        """将所有浮点参数和缓冲区转换为float64类型
+        
+        注意：
+            1. 只影响浮点类型张量
+            2. 此方法会就地修改模块
 
-        .. note::
-            This method modifies the module in-place.
-
-        Returns:
-            Module: self
+        返回：
+            Module: 返回self以支持链式调用
         """
+        # 条件转换：仅对浮点类型张量执行double()操作
         return self._apply(lambda t: t.double() if t.is_floating_point() else t)
 
     def half(self: T) -> T:
-        r"""Casts all floating point parameters and buffers to ``half`` datatype.
+        """将所有浮点参数和缓冲区转换为float16类型
+        
+        注意：
+            1. 只影响浮点类型张量
+            2. 此方法会就地修改模块
+            3. 可能损失数值精度
 
-        .. note::
-            This method modifies the module in-place.
-
-        Returns:
-            Module: self
+        返回：
+            Module: 返回self以支持链式调用
         """
+        # 条件转换：仅对浮点类型张量执行half()操作
         return self._apply(lambda t: t.half() if t.is_floating_point() else t)
 
     def bfloat16(self: T) -> T:
-        r"""Casts all floating point parameters and buffers to ``bfloat16`` datatype.
+        """将所有浮点参数和缓冲区转换为bfloat16类型
+        
+        注意：
+            1. 只影响浮点类型张量
+            2. 此方法会就地修改模块
+            3. 专为神经网络优化的16位浮点格式
 
-        .. note::
-            This method modifies the module in-place.
-
-        Returns:
-            Module: self
+        返回：
+            Module: 返回self以支持链式调用
         """
+        # 条件转换：仅对浮点类型张量执行bfloat16()操作
         return self._apply(lambda t: t.bfloat16() if t.is_floating_point() else t)
-
+    
     def to_empty(
-        self: T, *, device: Optional[DeviceLikeType], recurse: bool = True
+        self: T, 
+        *, 
+        device: Optional[DeviceLikeType], 
+        recurse: bool = True
     ) -> T:
-        r"""Move the parameters and buffers to the specified device without copying storage.
+        """将参数和缓冲区移动到指定设备但不复制存储数据（创建空张量）
+        
+        该方法会为参数和缓冲区创建新的未初始化张量，保持原张量的形状和类型，
+        但存储空间不会被复制（内容将保持未初始化状态）。
 
-        Args:
-            device (:class:`torch.device`): The desired device of the parameters
-                and buffers in this module.
-            recurse (bool): Whether parameters and buffers of submodules should
-                be recursively moved to the specified device.
+        参数：
+            device (torch.device): 目标设备（如'cuda:0'）
+            recurse (bool): 是否递归处理子模块，默认为True
 
-        Returns:
-            Module: self
+        返回：
+            Module: 返回self以支持链式调用
+
+        典型用例：
+            预分配GPU内存但不立即复制数据
         """
+        # 使用_apply创建形状相同但未初始化的新张量
         return self._apply(
-            lambda t: torch.empty_like(t, device=device), recurse=recurse
+            lambda t: torch.empty_like(t, device=device),  # 创建同形状的未初始化张量
+            recurse=recurse
         )
 
     @overload
@@ -1222,122 +1178,78 @@ class Module:
         dtype: Optional[dtype] = ...,
         non_blocking: bool = ...,
     ) -> Self:
+        """方法重载声明（类型注解用）
+        
+        用于类型检查器识别不同的参数组合：
+        1. to(device)
+        2. to(dtype)
+        3. to(device, dtype)
+        4. to(tensor)
+        """
         ...
-
     @overload
     def to(self, dtype: dtype, non_blocking: bool = ...) -> Self:
+        """类型转换重载声明（仅dtype参数）"""
         ...
 
-    @overload
+    @overload 
     def to(self, tensor: Tensor, non_blocking: bool = ...) -> Self:
+        """参照张量转换重载声明（根据目标张量属性转换）"""
         ...
 
     def to(self, *args, **kwargs):
-        r"""Move and/or cast the parameters and buffers.
+        """移动和/或转换参数与缓冲区的设备/类型
+        
+        支持四种调用方式：
+        1. to(device=None, dtype=None, non_blocking=False)
+        2. to(dtype, non_blocking=False) 
+        3. to(tensor, non_blocking=False)
+        4. to(memory_format=torch.channels_last)
 
-        This can be called as
+        签名与torch.Tensor.to类似，但仅接受浮点或复数类型。
+        整型参数只会移动设备，不会改变类型。
 
-        .. function:: to(device=None, dtype=None, non_blocking=False)
-           :noindex:
+        注意：
+            - 此方法会就地修改模块
+            - 设置non_blocking可尝试异步转换
+            - 从meta设备迁移时需使用to_empty()
 
-        .. function:: to(dtype, non_blocking=False)
-           :noindex:
+        参数：
+            device (torch.device): 目标设备
+            dtype (torch.dtype): 目标浮点/复数类型
+            tensor (Tensor): 参照张量（继承其设备/类型）
+            memory_format: 4D张量的内存布局格式
 
-        .. function:: to(tensor, non_blocking=False)
-           :noindex:
-
-        .. function:: to(memory_format=torch.channels_last)
-           :noindex:
-
-        Its signature is similar to :meth:`torch.Tensor.to`, but only accepts
-        floating point or complex :attr:`dtype`\ s. In addition, this method will
-        only cast the floating point or complex parameters and buffers to :attr:`dtype`
-        (if given). The integral parameters and buffers will be moved
-        :attr:`device`, if that is given, but with dtypes unchanged. When
-        :attr:`non_blocking` is set, it tries to convert/move asynchronously
-        with respect to the host if possible, e.g., moving CPU Tensors with
-        pinned memory to CUDA devices.
-
-        See below for examples.
-
-        .. note::
-            This method modifies the module in-place.
-
-        Args:
-            device (:class:`torch.device`): the desired device of the parameters
-                and buffers in this module
-            dtype (:class:`torch.dtype`): the desired floating point or complex dtype of
-                the parameters and buffers in this module
-            tensor (torch.Tensor): Tensor whose dtype and device are the desired
-                dtype and device for all parameters and buffers in this module
-            memory_format (:class:`torch.memory_format`): the desired memory
-                format for 4D parameters and buffers in this module (keyword
-                only argument)
-
-        Returns:
+        返回：
             Module: self
 
-        Examples::
-
-            >>> # xdoctest: +IGNORE_WANT("non-deterministic")
-            >>> linear = nn.Linear(2, 2)
-            >>> linear.weight
-            Parameter containing:
-            tensor([[ 0.1913, -0.3420],
-                    [-0.5113, -0.2325]])
-            >>> linear.to(torch.double)
-            Linear(in_features=2, out_features=2, bias=True)
-            >>> linear.weight
-            Parameter containing:
-            tensor([[ 0.1913, -0.3420],
-                    [-0.5113, -0.2325]], dtype=torch.float64)
-            >>> # xdoctest: +REQUIRES(env:TORCH_DOCTEST_CUDA1)
-            >>> gpu1 = torch.device("cuda:1")
-            >>> linear.to(gpu1, dtype=torch.half, non_blocking=True)
-            Linear(in_features=2, out_features=2, bias=True)
-            >>> linear.weight
-            Parameter containing:
-            tensor([[ 0.1914, -0.3420],
-                    [-0.5112, -0.2324]], dtype=torch.float16, device='cuda:1')
-            >>> cpu = torch.device("cpu")
-            >>> linear.to(cpu)
-            Linear(in_features=2, out_features=2, bias=True)
-            >>> linear.weight
-            Parameter containing:
-            tensor([[ 0.1914, -0.3420],
-                    [-0.5112, -0.2324]], dtype=torch.float16)
-
-            >>> linear = nn.Linear(2, 2, bias=None).to(torch.cdouble)
-            >>> linear.weight
-            Parameter containing:
-            tensor([[ 0.3741+0.j,  0.2382+0.j],
-                    [ 0.5593+0.j, -0.4443+0.j]], dtype=torch.complex128)
-            >>> linear(torch.ones(3, 2, dtype=torch.cdouble))
-            tensor([[0.6122+0.j, 0.1150+0.j],
-                    [0.6122+0.j, 0.1150+0.j],
-                    [0.6122+0.j, 0.1150+0.j]], dtype=torch.complex128)
-
+        示例：
+            >>> # 转换为float64类型
+            >>> model.to(torch.double)  
+            
+            >>> # 移动到GPU并转为半精度
+            >>> model.to('cuda', dtype=torch.half)
+            
+            >>> # 根据参照张量转换
+            >>> model.to(example_tensor)
         """
-        device, dtype, non_blocking, convert_to_format = torch._C._nn._parse_to(
-            *args, **kwargs
-        )
+        # 解析输入参数
+        device, dtype, non_blocking, convert_to_format = torch._C._nn._parse_to(*args, **kwargs)
 
+        # 类型校验
         if dtype is not None:
             if not (dtype.is_floating_point or dtype.is_complex):
-                raise TypeError(
-                    "nn.Module.to only accepts floating point or complex "
-                    f"dtypes, but got desired dtype={dtype}"
-                )
+                raise TypeError("仅支持浮点或复数类型")
             if dtype.is_complex:
                 warnings.warn(
-                    "Complex modules are a new feature under active development whose design may change, "
-                    "and some modules might not work as expected when using complex tensors as parameters or buffers. "
-                    "Please file an issue at https://github.com/pytorch/pytorch/issues/new?template=bug-report.yml "
-                    "if a complex module does not work as expected."
+                    "复数模块是实验性功能，可能存在问题，"
+                    "遇到问题请提交issue报告"
                 )
 
+        # 定义实际转换函数
         def convert(t):
             try:
+                # 处理4D/5D张量的内存格式转换
                 if convert_to_format is not None and t.dim() in (4, 5):
                     return t.to(
                         device,
@@ -1345,93 +1257,66 @@ class Module:
                         non_blocking,
                         memory_format=convert_to_format,
                     )
+                # 常规转换
                 return t.to(
                     device,
-                    dtype if t.is_floating_point() or t.is_complex() else None,
+                    dtype if t.is_floating_point() or t.is_complex() else None, 
                     non_blocking,
                 )
             except NotImplementedError as e:
-                if str(e) == "Cannot copy out of meta tensor; no data!":
+                if "meta tensor" in str(e):  # 处理meta设备特殊错误
                     raise NotImplementedError(
-                        f"{e} Please use torch.nn.Module.to_empty() instead of torch.nn.Module.to() "
-                        f"when moving module from meta to a different device."
+                        "从meta设备迁移请使用to_empty()方法"
                     ) from None
-                else:
-                    raise
+                raise
 
+        # 应用转换
         return self._apply(convert)
-
+    
     def register_full_backward_pre_hook(
         self,
         hook: Callable[["Module", _grad_t], Union[None, _grad_t]],
         prepend: bool = False,
     ) -> RemovableHandle:
-        r"""Register a backward pre-hook on the module.
+        """注册模块的反向传播前钩子（full backward pre-hook）
+        
+        每次计算模块梯度时都会调用该钩子。钩子函数签名应为：
+            hook(module, grad_output) -> 新梯度元组或None
+        
+        注意：
+            - grad_output是元组，对应模块输出的梯度
+            - 钩子不应修改输入参数，但可以返回替代grad_output的新梯度
+            - 非Tensor参数的梯度为None
+            - 使用后向钩子时禁止原地修改输入张量
 
-        The hook will be called every time the gradients for the module are computed.
-        The hook should have the following signature::
+        参数：
+            hook: 用户定义的钩子函数
+            prepend: 若为True，该钩子将在所有现有钩子之前执行
 
-            hook(module, grad_output) -> tuple[Tensor] or None
-
-        The :attr:`grad_output` is a tuple. The hook should
-        not modify its arguments, but it can optionally return a new gradient with
-        respect to the output that will be used in place of :attr:`grad_output` in
-        subsequent computations. Entries in :attr:`grad_output` will be ``None`` for
-        all non-Tensor arguments.
-
-        For technical reasons, when this hook is applied to a Module, its forward function will
-        receive a view of each Tensor passed to the Module. Similarly the caller will receive a view
-        of each Tensor returned by the Module's forward function.
-
-        .. warning ::
-            Modifying inputs inplace is not allowed when using backward hooks and
-            will raise an error.
-
-        Args:
-            hook (Callable): The user-defined hook to be registered.
-            prepend (bool): If true, the provided ``hook`` will be fired before
-                all existing ``backward_pre`` hooks on this
-                :class:`torch.nn.Module`. Otherwise, the provided
-                ``hook`` will be fired after all existing ``backward_pre`` hooks
-                on this :class:`torch.nn.Module`. Note that global
-                ``backward_pre`` hooks registered with
-                :func:`register_module_full_backward_pre_hook` will fire before
-                all hooks registered by this method.
-
-        Returns:
-            :class:`torch.utils.hooks.RemovableHandle`:
-                a handle that can be used to remove the added hook by calling
-                ``handle.remove()``
-
+        返回：
+            可移除的句柄，通过handle.remove()删除钩子
         """
-        handle = RemovableHandle(self._backward_pre_hooks)
-        self._backward_pre_hooks[handle.id] = hook
+        handle = RemovableHandle(self._backward_pre_hooks)  # 创建可移除句柄
+        self._backward_pre_hooks[handle.id] = hook  # 存储钩子函数
         if prepend:
-            self._backward_pre_hooks.move_to_end(handle.id, last=False)  # type: ignore[attr-defined]
+            # 将钩子移到字典前端实现优先执行
+            self._backward_pre_hooks.move_to_end(handle.id, last=False)
         return handle
 
     def register_backward_hook(
         self, hook: Callable[["Module", _grad_t, _grad_t], Union[None, _grad_t]]
     ) -> RemovableHandle:
-        r"""Register a backward hook on the module.
-
-        This function is deprecated in favor of :meth:`~torch.nn.Module.register_full_backward_hook` and
-        the behavior of this function will change in future versions.
-
-        Returns:
-            :class:`torch.utils.hooks.RemovableHandle`:
-                a handle that can be used to remove the added hook by calling
-                ``handle.remove()``
-
+        """注册旧版反向传播钩子（已弃用）
+        
+        注意：
+            - 未来版本将改变行为
+            - 不能与full_backward_hook同时使用
         """
         if self._is_full_backward_hook is True:
-            raise RuntimeError(
-                "Cannot use both regular backward hooks and full backward hooks on a "
-                "single Module. Please use only one of them."
-            )
-
-        self._is_full_backward_hook = False
-
+            raise RuntimeError("不能同时使用常规和完整反向钩子")
+        
+        self._is_full_backward_hook = False  # 标记为旧版钩子
+        
         handle = RemovableHandle(self._backward_hooks)
         self._backward_hooks[handle.id] = hook
         return handle
@@ -1441,95 +1326,88 @@ class Module:
         hook: Callable[["Module", _grad_t, _grad_t], Union[None, _grad_t]],
         prepend: bool = False,
     ) -> RemovableHandle:
-        r"""Register a backward hook on the module.
+        """注册完整的反向传播钩子
+        
+        触发规则：
+            1. 通常当计算模块输入梯度时触发
+            2. 若输入不需要梯度，则在计算输出梯度时触发
+            3. 若输出也不需要梯度，则不触发
 
-        The hook will be called every time the gradients with respect to a module are computed, and its firing rules are as follows:
+        钩子签名：
+            hook(module, grad_input, grad_output) -> 新输入梯度或None
+        
+        注意：
+            - grad_input对应位置参数的梯度（忽略kwargs）
+            - 禁止原地修改输入/输出张量
+            - 不能与旧版backward_hook同时使用
 
-            1. Ordinarily, the hook fires when the gradients are computed with respect to the module inputs.
-            2. If none of the module inputs require gradients, the hook will fire when the gradients are computed
-               with respect to module outputs.
-            3. If none of the module outputs require gradients, then the hooks will not fire.
-
-        The hook should have the following signature::
-
-            hook(module, grad_input, grad_output) -> tuple(Tensor) or None
-
-        The :attr:`grad_input` and :attr:`grad_output` are tuples that contain the gradients
-        with respect to the inputs and outputs respectively. The hook should
-        not modify its arguments, but it can optionally return a new gradient with
-        respect to the input that will be used in place of :attr:`grad_input` in
-        subsequent computations. :attr:`grad_input` will only correspond to the inputs given
-        as positional arguments and all kwarg arguments are ignored. Entries
-        in :attr:`grad_input` and :attr:`grad_output` will be ``None`` for all non-Tensor
-        arguments.
-
-        For technical reasons, when this hook is applied to a Module, its forward function will
-        receive a view of each Tensor passed to the Module. Similarly the caller will receive a view
-        of each Tensor returned by the Module's forward function.
-
-        .. warning ::
-            Modifying inputs or outputs inplace is not allowed when using backward hooks and
-            will raise an error.
-
-        Args:
-            hook (Callable): The user-defined hook to be registered.
-            prepend (bool): If true, the provided ``hook`` will be fired before
-                all existing ``backward`` hooks on this
-                :class:`torch.nn.Module`. Otherwise, the provided
-                ``hook`` will be fired after all existing ``backward`` hooks on
-                this :class:`torch.nn.Module`. Note that global
-                ``backward`` hooks registered with
-                :func:`register_module_full_backward_hook` will fire before
-                all hooks registered by this method.
-
-        Returns:
-            :class:`torch.utils.hooks.RemovableHandle`:
-                a handle that can be used to remove the added hook by calling
-                ``handle.remove()``
-
+        参数：
+            prepend: 若为True，该钩子将优先执行
         """
         if self._is_full_backward_hook is False:
-            raise RuntimeError(
-                "Cannot use both regular backward hooks and full backward hooks on a "
-                "single Module. Please use only one of them."
-            )
-
-        self._is_full_backward_hook = True
-
+            raise RuntimeError("不能同时使用常规和完整反向钩子")
+        
+        self._is_full_backward_hook = True  # 标记为完整钩子
+        
         handle = RemovableHandle(self._backward_hooks)
         self._backward_hooks[handle.id] = hook
         if prepend:
-            self._backward_hooks.move_to_end(handle.id, last=False)  # type: ignore[attr-defined]
+            self._backward_hooks.move_to_end(handle.id, last=False)
         return handle
-
     def _get_backward_hooks(self):
-        r"""Return the backward hooks for use in the call function.
-
-        It returns two lists, one with the full backward hooks and one with the non-full
-        backward hooks.
+        """获取当前模块的所有反向传播钩子
+        
+        返回两个列表：
+        1. full_backward_hooks: 完整反向钩子列表
+        2. non_full_backward_hooks: 非完整反向钩子列表
+        
+        注意：
+            - 会合并全局钩子和模块本地钩子
+            - 根据_is_full_backward_hook标志分类
         """
         full_backward_hooks: list[Callable] = []
+        # 收集全局完整钩子
         if _global_is_full_backward_hook is True:
             full_backward_hooks += _global_backward_hooks.values()
+        # 收集模块本地完整钩子
         if self._is_full_backward_hook is True:
             full_backward_hooks += self._backward_hooks.values()
 
         non_full_backward_hooks: list[Callable] = []
+        # 收集全局非完整钩子
         if _global_is_full_backward_hook is False:
             non_full_backward_hooks += _global_backward_hooks.values()
+        # 收集模块本地非完整钩子
         if self._is_full_backward_hook is False:
             non_full_backward_hooks += self._backward_hooks.values()
 
         return full_backward_hooks, non_full_backward_hooks
 
     def _get_backward_pre_hooks(self):
+        """获取所有反向传播前钩子
+        
+        返回合并后的列表（全局+本地）
+        """
         backward_pre_hooks: list[Callable] = []
         backward_pre_hooks += _global_backward_pre_hooks.values()
         backward_pre_hooks += self._backward_pre_hooks.values()
-
         return backward_pre_hooks
 
     def _maybe_warn_non_full_backward_hook(self, inputs, result, grad_fn):
+        """检查非完整反向钩子的使用场景并发出警告
+        
+        参数：
+            inputs: 模块的输入张量
+            result: 模块的输出张量
+            grad_fn: 梯度计算函数
+            
+        触发警告的场景：
+        1. 输入/输出不是张量或张量元组
+        2. 输出嵌套在Python数据结构中
+        3. 输出由不同计算节点生成
+        4. 前向传播包含多个计算节点
+        """
+        # 检查输出类型
         if not isinstance(result, torch.Tensor):
             if not (
                 isinstance(result, tuple)
@@ -1545,8 +1423,9 @@ class Module:
                 )
                 return
         else:
-            result = (result,)
+            result = (result,)  # 统一转为元组
 
+        # 检查输入类型
         if not isinstance(inputs, torch.Tensor):
             if not (
                 isinstance(inputs, tuple)
@@ -1562,44 +1441,36 @@ class Module:
                 )
                 return
         else:
-            inputs = (inputs,)
+            inputs = (inputs,)  # 统一转为元组
 
-        # At this point we are sure that inputs and result are tuple of Tensors
+        # 检查输出计算节点
         out_grad_fn = {r.grad_fn for r in result if r.grad_fn is not None}
-        if len(out_grad_fn) == 0 or (
-            len(out_grad_fn) == 1 and grad_fn not in out_grad_fn
-        ):
+        if len(out_grad_fn) == 0 or (len(out_grad_fn) == 1 and grad_fn not in out_grad_fn):
             warnings.warn(
-                "Using a non-full backward hook when outputs are nested in python data structure "
-                "is deprecated and will be removed in future versions. This hook will be missing "
-                "some grad_output.",
+                "当输出嵌套在Python数据结构中使用非完整反向钩子已被弃用，"
+                "该钩子将丢失部分grad_output",
                 FutureWarning,
                 stacklevel=2,
             )
         elif len(out_grad_fn) > 1:
             warnings.warn(
-                "Using a non-full backward hook when outputs are generated by different autograd Nodes "
-                "is deprecated and will be removed in future versions. This hook will be missing "
-                "some grad_output. Please use register_full_backward_hook to get the documented behavior.",
+                "当输出由不同计算节点生成时使用非完整反向钩子已被弃用，"
+                "该钩子将丢失部分grad_output。请改用完整反向钩子",
                 FutureWarning,
                 stacklevel=2,
             )
         else:
-            # At this point the grad_output part of the hook will most likely be correct
+            # 检查输入计算节点
             inputs_grad_fn = {i.grad_fn for i in inputs if i.grad_fn is not None}
-
             next_functions = {n[0] for n in grad_fn.next_functions}
-
+            
             if inputs_grad_fn != next_functions:
                 warnings.warn(
-                    "Using a non-full backward hook when the forward contains multiple autograd Nodes "
-                    "is deprecated and will be removed in future versions. This hook will be missing "
-                    "some grad_input. Please use register_full_backward_hook to get the documented "
-                    "behavior.",
+                    "当前向传播包含多个计算节点时使用非完整反向钩子已被弃用，"
+                    "该钩子将丢失部分grad_input。请改用完整反向钩子",
                     FutureWarning,
                     stacklevel=2,
                 )
-
     def register_forward_pre_hook(
         self,
         hook: Union[
@@ -1613,47 +1484,48 @@ class Module:
         prepend: bool = False,
         with_kwargs: bool = False,
     ) -> RemovableHandle:
-        r"""Register a forward pre-hook on the module.
+        r"""注册前向传播预处理钩子
 
-        The hook will be called every time before :func:`forward` is invoked.
+        功能特性：
+        - 在forward()执行前拦截并可能修改输入参数
+        - 支持两种调用签名（是否处理关键字参数）
+        - 提供执行顺序控制和安全注销机制
 
+        参数说明：
+            hook: 用户定义的钩子函数，有两种形式：
+                1. 基础形式: hook(module, args) -> 修改后的输入或None
+                2. 增强形式: hook(module, args, kwargs) -> (修改后的输入, kwargs)或None
+            prepend: 是否优先执行（插入钩子队列头部）
+            with_kwargs: 是否向钩子传递关键字参数
 
-        If ``with_kwargs`` is false or not specified, the input contains only
-        the positional arguments given to the module. Keyword arguments won't be
-        passed to the hooks and only to the ``forward``. The hook can modify the
-        input. User can either return a tuple or a single modified value in the
-        hook. We will wrap the value into a tuple if a single value is returned
-        (unless that value is already a tuple). The hook should have the
-        following signature::
+        技术实现：
+        1. 使用RemovableHandle实现安全的钩子注销
+        2. 通过两个字典分别存储钩子和kwargs标记：
+        - _forward_pre_hooks: 存储所有钩子函数
+        - _forward_pre_hooks_with_kwargs: 标记需要kwargs的钩子
+        3. 使用OrderedDict的move_to_end控制执行顺序
 
-            hook(module, args) -> None or modified input
+        典型应用场景：
+        - 输入数据预处理（如标准化）
+        - 动态参数调整（如dropout率）
+        - 输入有效性校验
+        - 调试信息收集
 
-        If ``with_kwargs`` is true, the forward pre-hook will be passed the
-        kwargs given to the forward function. And if the hook modifies the
-        input, both the args and kwargs should be returned. The hook should have
-        the following signature::
-
-            hook(module, args, kwargs) -> None or a tuple of modified input and kwargs
-
-        Args:
-            hook (Callable): The user defined hook to be registered.
-            prepend (bool): If true, the provided ``hook`` will be fired before
-                all existing ``forward_pre`` hooks on this
-                :class:`torch.nn.Module`. Otherwise, the provided
-                ``hook`` will be fired after all existing ``forward_pre`` hooks
-                on this :class:`torch.nn.Module`. Note that global
-                ``forward_pre`` hooks registered with
-                :func:`register_module_forward_pre_hook` will fire before all
-                hooks registered by this method.
-                Default: ``False``
-            with_kwargs (bool): If true, the ``hook`` will be passed the kwargs
-                given to the forward function.
-                Default: ``False``
-
-        Returns:
-            :class:`torch.utils.hooks.RemovableHandle`:
-                a handle that can be used to remove the added hook by calling
-                ``handle.remove()``
+        示例：
+            # 修改输入数据
+            def transform_input(module, args):
+                return args[0] * 2  # 所有输入放大2倍
+                
+            # 处理关键字参数    
+            def process_kwargs(module, args, kwargs):
+                kwargs['mask'] = kwargs['mask'].float()
+                return args, kwargs
+                
+            handle = model.register_forward_pre_hook(transform_input)
+            kwarg_handle = model.register_forward_pre_hook(
+                process_kwargs, 
+                with_kwargs=True
+            )
         """
         handle = RemovableHandle(
             self._forward_pre_hooks, extra_dict=self._forward_pre_hooks_with_kwargs
@@ -1669,160 +1541,207 @@ class Module:
     def register_forward_hook(
         self,
         hook: Union[
-            Callable[[T, tuple[Any, ...], Any], Optional[Any]],
-            Callable[[T, tuple[Any, ...], dict[str, Any], Any], Optional[Any]],
+            Callable[[T, tuple[Any, ...], Any], Optional[Any]],  # 基础钩子：模块、输入参数、输出
+            Callable[[T, tuple[Any, ...], dict[str, Any], Any], Optional[Any]],  # 增强钩子：带kwargs
         ],
         *,
-        prepend: bool = False,
-        with_kwargs: bool = False,
-        always_call: bool = False,
+        prepend: bool = False,     # 是否优先执行
+        with_kwargs: bool = False,  # 是否传递kwargs参数
+        always_call: bool = False,  # 是否在异常时仍执行
     ) -> RemovableHandle:
-        r"""Register a forward hook on the module.
+        """注册前向传播后处理钩子（forward hook）
+        
+        该钩子会在每次forward()计算输出后被调用，主要用于：
+        - 监控和修改模块输出
+        - 特征提取和中间结果捕获
+        - 调试和可视化
 
-        The hook will be called every time after :func:`forward` has computed an output.
+        参数说明：
+            hook: 钩子函数，有两种形式：
+                1. 基础形式: hook(module, args, output) -> 修改后的输出或None
+                2. 增强形式: hook(module, args, kwargs, output) -> 修改后的输出或None
+            prepend: 是否插入钩子队列头部优先执行
+            with_kwargs: 是否向钩子传递原始kwargs参数
+            always_call: 是否在forward抛出异常时仍强制执行
 
-        If ``with_kwargs`` is ``False`` or not specified, the input contains only
-        the positional arguments given to the module. Keyword arguments won't be
-        passed to the hooks and only to the ``forward``. The hook can modify the
-        output. It can modify the input inplace but it will not have effect on
-        forward since this is called after :func:`forward` is called. The hook
-        should have the following signature::
+        技术实现：
+        1. 使用三个字典维护钩子状态：
+        - _forward_hooks: 存储所有钩子函数
+        - _forward_hooks_with_kwargs: 标记需要kwargs的钩子
+        - _forward_hooks_always_called: 标记异常时仍执行的钩子
+        2. 通过OrderedDict的move_to_end控制执行顺序
 
-            hook(module, args, output) -> None or modified output
-
-        If ``with_kwargs`` is ``True``, the forward hook will be passed the
-        ``kwargs`` given to the forward function and be expected to return the
-        output possibly modified. The hook should have the following signature::
-
-            hook(module, args, kwargs, output) -> None or modified output
-
-        Args:
-            hook (Callable): The user defined hook to be registered.
-            prepend (bool): If ``True``, the provided ``hook`` will be fired
-                before all existing ``forward`` hooks on this
-                :class:`torch.nn.Module`. Otherwise, the provided
-                ``hook`` will be fired after all existing ``forward`` hooks on
-                this :class:`torch.nn.Module`. Note that global
-                ``forward`` hooks registered with
-                :func:`register_module_forward_hook` will fire before all hooks
-                registered by this method.
-                Default: ``False``
-            with_kwargs (bool): If ``True``, the ``hook`` will be passed the
-                kwargs given to the forward function.
-                Default: ``False``
-            always_call (bool): If ``True`` the ``hook`` will be run regardless of
-                whether an exception is raised while calling the Module.
-                Default: ``False``
-
-        Returns:
-            :class:`torch.utils.hooks.RemovableHandle`:
-                a handle that can be used to remove the added hook by calling
-                ``handle.remove()``
+        典型应用场景：
+            # 特征提取
+            def feature_extractor(module, args, output):
+                features[module.name] = output.detach()
+                
+            # 输出归一化    
+            def normalize_output(module, args, kwargs, output):
+                return F.normalize(output, p=2)
+                
+            handle = model.register_forward_hook(feature_extractor)
+            norm_handle = model.register_forward_hook(
+                normalize_output, 
+                with_kwargs=True
+            )
         """
+        # 创建可移除句柄，关联三个状态字典
         handle = RemovableHandle(
             self._forward_hooks,
             extra_dict=[
-                self._forward_hooks_with_kwargs,
-                self._forward_hooks_always_called,
+                self._forward_hooks_with_kwargs,  # kwargs标记字典
+                self._forward_hooks_always_called  # 异常处理标记字典
             ],
         )
+        
+        # 存储钩子函数
         self._forward_hooks[handle.id] = hook
+        
+        # 设置钩子属性标记
         if with_kwargs:
             self._forward_hooks_with_kwargs[handle.id] = True
         if always_call:
             self._forward_hooks_always_called[handle.id] = True
+
+        # 控制执行顺序
         if prepend:
-            self._forward_hooks.move_to_end(handle.id, last=False)  # type: ignore[attr-defined]
+            self._forward_hooks.move_to_end(handle.id, last=False)
+        
         return handle
 
     def _slow_forward(self, *input, **kwargs):
+        """慢速前向传播路径（用于JIT追踪和调试）
+        
+        在模型编译/追踪阶段使用，主要功能：
+        1. 处理JIT追踪时的作用域管理
+        2. 提供调试接口支持
+        3. 保持与普通forward的兼容性
+
+        参数：
+            *input: 可变位置参数
+            **kwargs: 可变关键字参数
+
+        返回：
+            前向传播计算结果
+        """
+        # 获取当前JIT追踪状态
         tracing_state = torch._C._get_tracing_state()
+        
+        # 非追踪状态或ScriptMethod直接调用forward
         if not tracing_state or isinstance(self.forward, torch._C.ScriptMethod):
             return self.forward(*input, **kwargs)
+        
+        # 检查是否需要记录作用域（用于调试和可视化）
         recording_scopes = torch.jit._trace._trace_module_map is not None
         if recording_scopes:
-            # type ignore was added because at this point one knows that
-            # torch.jit._trace._trace_module_map is not Optional and has type Dict[Any, Any]
-            name = torch.jit._trace._trace_module_map[self] if self in torch.jit._trace._trace_module_map else None  # type: ignore[index, operator] # noqa: B950
+            # 从模块映射中获取当前模块的名称（用于作用域标记）
+            name = torch.jit._trace._trace_module_map[self] if self in torch.jit._trace._trace_module_map else None
             if name:
-                tracing_state.push_scope(name)
+                tracing_state.push_scope(name)  # 压入作用域栈
             else:
                 recording_scopes = False
+        
         try:
+            # 执行实际前向计算
             result = self.forward(*input, **kwargs)
         finally:
+            # 确保作用域栈平衡
             if recording_scopes:
-                tracing_state.pop_scope()
+                tracing_state.pop_scope()  # 弹出作用域
+        
         return result
 
     def _wrapped_call_impl(self, *args, **kwargs):
+        """调用实现的包装器
+        
+        提供编译优化路径和常规路径的切换：
+        1. 优先使用编译优化后的实现（如TorchScript）
+        2. 回退到标准调用实现
+        
+        参数：
+            *args: 可变位置参数
+            **kwargs: 可变关键字参数
+            
+        返回：
+            模块调用结果
+        """
         if self._compiled_call_impl is not None:
-            return self._compiled_call_impl(*args, **kwargs)  # type: ignore[misc]
+            # 使用编译优化版本（如经过TorchScript编译）
+            return self._compiled_call_impl(*args, **kwargs)
         else:
+            # 回退到标准调用实现
             return self._call_impl(*args, **kwargs)
-
-    # torchrec tests the code consistency with the following code
-    # fmt: off
     def _call_impl(self, *args, **kwargs):
+        """模块调用的核心实现，处理前向传播的所有钩子逻辑
+        
+        主要功能：
+        1. 管理前向/反向传播钩子的执行顺序
+        2. 处理异常情况下的钩子调用
+        3. 提供JIT编译兼容性支持
+        """
+        # 决定使用普通forward还是带追踪的slow_forward
         forward_call = (self._slow_forward if torch._C._get_tracing_state() else self.forward)
-        # If we don't have any hooks, we want to skip the rest of the logic in
-        # this function, and just call forward.
-        if not (self._backward_hooks or self._backward_pre_hooks or self._forward_hooks or self._forward_pre_hooks
-                or _global_backward_pre_hooks or _global_backward_hooks
-                or _global_forward_hooks or _global_forward_pre_hooks):
+        
+        # 快速路径：没有任何钩子时直接调用forward
+        if not (self._backward_hooks or self._backward_pre_hooks or self._forward_hooks 
+                or self._forward_pre_hooks or _global_backward_pre_hooks 
+                or _global_backward_hooks or _global_forward_hooks 
+                or _global_forward_pre_hooks):
             return forward_call(*args, **kwargs)
 
+        # 初始化结果和已调用钩子记录
         result = None
         called_always_called_hooks = set()
 
         def inner():
+            """实际执行前向传播和钩子的内部函数"""
             nonlocal result, args, kwargs
 
+            # 1. 收集所有反向传播钩子
             full_backward_hooks, non_full_backward_hooks = [], []
             backward_pre_hooks = []
             if self._backward_pre_hooks or _global_backward_pre_hooks:
                 backward_pre_hooks = self._get_backward_pre_hooks()
-
             if self._backward_hooks or _global_backward_hooks:
                 full_backward_hooks, non_full_backward_hooks = self._get_backward_hooks()
 
+            # 2. 执行前向预处理钩子（修改输入）
             if _global_forward_pre_hooks or self._forward_pre_hooks:
-                for hook_id, hook in (
-                    *_global_forward_pre_hooks.items(),
-                    *self._forward_pre_hooks.items(),
-                ):
+                for hook_id, hook in (*_global_forward_pre_hooks.items(), 
+                                    *self._forward_pre_hooks.items()):
                     if hook_id in self._forward_pre_hooks_with_kwargs:
-                        args_kwargs_result = hook(self, args, kwargs)  # type: ignore[misc]
+                        # 处理带kwargs的pre-hook
+                        args_kwargs_result = hook(self, args, kwargs)
                         if args_kwargs_result is not None:
                             if isinstance(args_kwargs_result, tuple) and len(args_kwargs_result) == 2:
                                 args, kwargs = args_kwargs_result
                             else:
-                                raise RuntimeError(
-                                    "forward pre-hook must return None or a tuple "
-                                    f"of (new_args, new_kwargs), but got {args_kwargs_result}."
-                                )
+                                raise RuntimeError("forward pre-hook必须返回None或(args, kwargs)元组")
                     else:
+                        # 处理普通pre-hook
                         args_result = hook(self, args)
                         if args_result is not None:
-                            if not isinstance(args_result, tuple):
-                                args_result = (args_result,)
-                            args = args_result
+                            args = args_result if isinstance(args_result, tuple) else (args_result,)
 
+            # 3. 设置反向钩子（如果需要）
             bw_hook = None
             if full_backward_hooks or backward_pre_hooks:
                 bw_hook = BackwardHook(self, full_backward_hooks, backward_pre_hooks)
                 args = bw_hook.setup_input_hook(args)
 
+            # 4. 执行实际前向计算
             result = forward_call(*args, **kwargs)
+
+            # 5. 执行前向后处理钩子（修改输出）
             if _global_forward_hooks or self._forward_hooks:
-                for hook_id, hook in (
-                    *_global_forward_hooks.items(),
-                    *self._forward_hooks.items(),
-                ):
-                    # mark that always called hook is run
+                for hook_id, hook in (*_global_forward_hooks.items(), 
+                                *self._forward_hooks.items()):
+                    # 标记已执行的always_call钩子
                     if hook_id in self._forward_hooks_always_called or hook_id in _global_forward_hooks_always_called:
                         called_always_called_hooks.add(hook_id)
 
+                    # 根据类型调用不同签名的hook
                     if hook_id in self._forward_hooks_with_kwargs or hook_id in _global_forward_hooks_with_kwargs:
                         hook_result = hook(self, args, kwargs, result)
                     else:
@@ -1831,21 +1750,22 @@ class Module:
                     if hook_result is not None:
                         result = hook_result
 
+            # 6. 设置输出反向钩子
             if bw_hook:
                 if not isinstance(result, (torch.Tensor, tuple)):
-                    warnings.warn("For backward hooks to be called,"
-                                  " module output should be a Tensor or a tuple of Tensors"
-                                  f" but received {type(result)}")
+                    warnings.warn("反向钩子需要输出为Tensor或Tensor元组")
                 result = bw_hook.setup_output_hook(result)
 
-            # Handle the non-full backward hooks
+            # 7. 处理非完整反向钩子
             if non_full_backward_hooks:
                 var = result
+                # 找到结果中的第一个Tensor
                 while not isinstance(var, torch.Tensor):
                     if isinstance(var, dict):
                         var = next(v for v in var.values() if isinstance(v, torch.Tensor))
                     else:
                         var = var[0]
+                # 注册梯度计算钩子
                 grad_fn = var.grad_fn
                 if grad_fn is not None:
                     for hook in non_full_backward_hooks:
@@ -1854,229 +1774,280 @@ class Module:
 
             return result
 
-        # This is technically not behavior equivalent when compiling, but it's
-        # incredibly unlikely we will ever support throwing an exception in NN
-        # module, and then catching it here, and then reraising it, and then
-        # catching it again, and expecting the resulting frame to be compiled.
-        # The reraise here just gunks up our exception handling for no good
-        # reason.  Don't try to run the always called hooks in event of
-        # exception.
-        if torch.compiler.is_compiling():
+        # 异常处理逻辑
+        if torch.compiler.is_compiling():  # 编译模式下不处理异常
             return inner()
-
+        
         try:
             return inner()
         except Exception:
-            # run always called hooks if they have not already been run
-            # For now only forward hooks have the always_call option but perhaps
-            # this functionality should be added to full backward hooks as well.
+            # 异常时强制执行always_call标记的钩子
             for hook_id, hook in _global_forward_hooks.items():
-                if hook_id in _global_forward_hooks_always_called and hook_id not in called_always_called_hooks:  # type: ignore[possibly-undefined]
+                if hook_id in _global_forward_hooks_always_called and hook_id not in called_always_called_hooks:
                     try:
-                        hook_result = hook(self, args, result)  # type: ignore[possibly-undefined]
+                        hook_result = hook(self, args, result)
                         if hook_result is not None:
                             result = hook_result
                     except Exception as e:
-                        warnings.warn("global module forward hook with ``always_call=True`` raised an exception "
-                                      f"that was silenced as another error was raised in forward: {str(e)}")
-                        continue
-
+                        warnings.warn(f"全局always_call钩子异常被忽略: {str(e)}")
+            
             for hook_id, hook in self._forward_hooks.items():
-                if hook_id in self._forward_hooks_always_called and hook_id not in called_always_called_hooks:  # type: ignore[possibly-undefined]
+                if hook_id in self._forward_hooks_always_called and hook_id not in called_always_called_hooks:
                     try:
                         if hook_id in self._forward_hooks_with_kwargs:
-                            hook_result = hook(self, args, kwargs, result)  # type: ignore[possibly-undefined]
+                            hook_result = hook(self, args, kwargs, result)
                         else:
-                            hook_result = hook(self, args, result)  # type: ignore[possibly-undefined]
+                            hook_result = hook(self, args, result)
                         if hook_result is not None:
                             result = hook_result
                     except Exception as e:
-                        warnings.warn("module forward hook with ``always_call=True`` raised an exception "
-                                      f"that was silenced as another error was raised in forward: {str(e)}")
-                        continue
-            # raise exception raised in try block
-            raise
+                        warnings.warn(f"模块always_call钩子异常被忽略: {str(e)}")
+            
+            raise  
     # fmt: on
-
     __call__: Callable[..., Any] = _wrapped_call_impl
 
     def __getstate__(self):
+        # 获取对象状态字典的副本，用于序列化
         state = self.__dict__.copy()
+        # 移除不需要序列化的属性"_compiled_call_impl"
         state.pop("_compiled_call_impl", None)
         return state
 
     def __setstate__(self, state):
+        # 将反序列化得到的状态字典更新到当前对象
         self.__dict__.update(state)
 
-        # Support loading old checkpoints that don't have the following attrs:
+        # 以下代码处理旧版本检查点加载时的兼容性问题
+        # 为可能缺失的属性设置默认值
         if "_forward_pre_hooks" not in self.__dict__:
-            self._forward_pre_hooks = OrderedDict()
+            self._forward_pre_hooks = OrderedDict()  # 前向预钩子
         if "_forward_pre_hooks_with_kwargs" not in self.__dict__:
-            self._forward_pre_hooks_with_kwargs = OrderedDict()
+            self._forward_pre_hooks_with_kwargs = OrderedDict()  # 带参数的前向预钩子
         if "_forward_hooks_with_kwargs" not in self.__dict__:
-            self._forward_hooks_with_kwargs = OrderedDict()
+            self._forward_hooks_with_kwargs = OrderedDict()  # 带参数的前向钩子
         if "_forward_hooks_always_called" not in self.__dict__:
-            self._forward_hooks_always_called = OrderedDict()
+            self._forward_hooks_always_called = OrderedDict()  # 总是调用的前向钩子
         if "_state_dict_hooks" not in self.__dict__:
-            self._state_dict_hooks = OrderedDict()
+            self._state_dict_hooks = OrderedDict()  # 状态字典钩子
         if "_state_dict_pre_hooks" not in self.__dict__:
-            self._state_dict_pre_hooks = OrderedDict()
+            self._state_dict_pre_hooks = OrderedDict()  # 状态字典预钩子
         if "_load_state_dict_pre_hooks" not in self.__dict__:
-            self._load_state_dict_pre_hooks = OrderedDict()
+            self._load_state_dict_pre_hooks = OrderedDict()  # 加载状态字典预钩子
         if "_load_state_dict_post_hooks" not in self.__dict__:
-            self._load_state_dict_post_hooks = OrderedDict()
+            self._load_state_dict_post_hooks = OrderedDict()  # 加载状态字典后钩子
         if "_non_persistent_buffers_set" not in self.__dict__:
-            self._non_persistent_buffers_set = set()
+            self._non_persistent_buffers_set = set()  # 非持久化缓冲区集合
         if "_is_full_backward_hook" not in self.__dict__:
-            self._is_full_backward_hook = None
+            self._is_full_backward_hook = None  # 完整反向钩子标志
         if "_backward_pre_hooks" not in self.__dict__:
-            self._backward_pre_hooks = OrderedDict()
+            self._backward_pre_hooks = OrderedDict()  # 反向预钩子
+
 
     # It is crucial that the return type is not annotated as `Any`, otherwise type checking
     # on `torch.nn.Module` and all its subclasses is largely disabled as a result. See:
     # https://github.com/pytorch/pytorch/pull/115074
     def __getattr__(self, name: str) -> Union[Tensor, "Module"]:
+        """
+        动态属性访问方法，用于获取模块的参数、缓冲区或子模块
+        参数:
+            name (str): 要访问的属性名称
+        返回:
+            Union[Tensor, "Module"]: 返回参数(Tensor)、缓冲区(Tensor)或子模块(Module)
+        抛出:
+            AttributeError: 当属性不存在时抛出异常
+        """
+        # 检查_parameters字典是否存在，并查找指定名称的参数
         if "_parameters" in self.__dict__:
             _parameters = self.__dict__["_parameters"]
             if name in _parameters:
-                return _parameters[name]
+                return _parameters[name]  # 返回找到的参数Tensor
+
+        # 检查_buffers字典是否存在，并查找指定名称的缓冲区
         if "_buffers" in self.__dict__:
             _buffers = self.__dict__["_buffers"]
             if name in _buffers:
-                return _buffers[name]
+                return _buffers[name]  # 返回找到的缓冲区Tensor
+
+        # 检查_modules字典是否存在，并查找指定名称的子模块
         if "_modules" in self.__dict__:
             modules = self.__dict__["_modules"]
             if name in modules:
-                return modules[name]
+                return modules[name]  # 返回找到的子模块Module
+
+        # 如果以上都未找到，抛出属性错误异常
         raise AttributeError(
             f"'{type(self).__name__}' object has no attribute '{name}'"
         )
 
     def __setattr__(self, name: str, value: Union[Tensor, "Module"]) -> None:
+        """属性设置方法（核心方法，处理模块参数的动态管理）
+        
+        主要功能：
+        1. 自动识别并注册Parameter/Module/Buffer等特殊属性
+        2. 维护模块内部状态的一致性
+        3. 提供全局注册钩子支持
+        
+        参数：
+            name: 属性名
+            value: 属性值（可以是Parameter/Module/Tensor等）
+        """
+        
         def remove_from(*dicts_or_sets):
+            """辅助函数：从多个字典/集合中移除指定key"""
             for d in dicts_or_sets:
                 if name in d:
                     if isinstance(d, dict):
-                        del d[name]
+                        del d[name]  # 字典直接删除
                     else:
-                        d.discard(name)
+                        d.discard(name)  # 集合安全移除
 
+        # 获取当前参数字典（可能在__init__之前为None）
         params = self.__dict__.get("_parameters")
+        
+        # 情况1：值为Parameter类型
         if isinstance(value, Parameter):
             if params is None:
-                raise AttributeError(
-                    "cannot assign parameters before Module.__init__() call"
-                )
+                raise AttributeError("必须在Module.__init__()之后才能分配参数")
+            
+            # 清理其他容器中的同名项（保证唯一性）
             remove_from(
                 self.__dict__,
                 self._buffers,
                 self._modules,
                 self._non_persistent_buffers_set,
             )
-            self.register_parameter(name, value)
+            self.register_parameter(name, value)  # 正式注册参数
+            
+        # 情况2：参数置为None（删除参数）
         elif params is not None and name in params:
             if value is not None:
-                raise TypeError(
-                    f"cannot assign '{torch.typename(value)}' as parameter '{name}' "
-                    "(torch.nn.Parameter or None expected)"
-                )
+                raise TypeError(f"只能分配Parameter或None到参数'{name}'")
             self.register_parameter(name, value)
+            
         else:
+            # 获取当前子模块字典
             modules = self.__dict__.get("_modules")
+            
+            # 情况3：值为Module类型
             if isinstance(value, Module):
                 if modules is None:
-                    raise AttributeError(
-                        "cannot assign module before Module.__init__() call"
-                    )
+                    raise AttributeError("必须在Module.__init__()之后才能分配子模块")
+                
+                # 清理其他容器中的同名项
                 remove_from(
                     self.__dict__,
                     self._parameters,
                     self._buffers,
                     self._non_persistent_buffers_set,
                 )
+                
+                # 执行全局注册钩子（允许修改value）
                 for hook in _global_module_registration_hooks.values():
                     output = hook(self, name, value)
                     if output is not None:
                         value = output
-                modules[name] = value
+                        
+                modules[name] = value  # 注册子模块
+                
+            # 情况4：子模块置为None（删除子模块）
             elif modules is not None and name in modules:
                 if value is not None:
-                    raise TypeError(
-                        f"cannot assign '{torch.typename(value)}' as child module '{name}' "
-                        "(torch.nn.Module or None expected)"
-                    )
+                    raise TypeError(f"只能分配Module或None到子模块'{name}'")
+                    
+                # 同样执行全局钩子
                 for hook in _global_module_registration_hooks.values():
                     output = hook(self, name, value)
                     if output is not None:
                         value = output
+                        
                 modules[name] = value
+                
             else:
+                # 获取当前buffer字典
                 buffers = self.__dict__.get("_buffers")
-                if isinstance(value, Buffer) or buffers is not None and name in buffers:
+                
+                # 情况5：值为Buffer/Tensor类型
+                if isinstance(value, Buffer) or (buffers is not None and name in buffers):
                     if value is not None and not isinstance(value, torch.Tensor):
-                        raise TypeError(
-                            f"cannot assign '{torch.typename(value)}' as buffer '{name}' "
-                            "(torch.nn.Buffer, torch.Tensor or None expected)"
-                        )
-                    if isinstance(value, Buffer):
-                        persistent = value.persistent
-                    else:
-                        persistent = name not in self._non_persistent_buffers_set
-                    # === HACK ===
-                    # This whole block below should just be:
-                    # self.register_buffer(name, value, persistent)
-
-                    # But to support subclasses of nn.Module that (wrongfully) implement a
-                    # register_buffer() method that doesn't have the "persistent"
-                    # argument. Only pass it in if it is accepted otherwise assume
-                    # it is always true
+                        raise TypeError(f"只能分配Buffer/Tensor到'{name}'")
+                    
+                    # 确定buffer是否持久化
+                    persistent = (
+                        value.persistent if isinstance(value, Buffer) 
+                        else name not in self._non_persistent_buffers_set
+                    )
+                    
+                    # === 兼容性处理（历史原因）===
+                    # 处理子类可能没有persistent参数的情况
                     if self.register_buffer is torch.nn.Module.register_buffer:
+                        # 标准情况直接调用
                         self.register_buffer(name, value, persistent)
                     else:
+                        # 检查子类实现是否支持persistent参数
                         sign = inspect.signature(self.register_buffer)
                         if "persistent" in sign.parameters:
                             self.register_buffer(name, value, persistent)
                         else:
                             if not persistent:
                                 raise RuntimeError(
-                                    "Registering a non-persistent buffer "
-                                    "on a Module subclass that implements "
-                                    "register_buffer() without the persistent "
-                                    "argument is not allowed."
+                                    "不支持在不含persistent参数的register_buffer中注册非持久buffer"
                                 )
-                            # Assume that the implementation without the argument has the
-                            # behavior from before the argument was added: persistent=True
+                            # 回退到旧版行为（默认持久化）
                             self.register_buffer(name, value)
-                    # === HACK END ===
+                    # === 兼容性处理结束 ===
+                    
                 else:
+                    # 情况6：普通属性设置
                     super().__setattr__(name, value)
-
     def __delattr__(self, name):
+        """
+        删除对象属性的特殊方法，用于安全删除模块的参数、缓冲区或子模块
+        
+        参数:
+            name: 要删除的属性名称
+        
+        处理逻辑:
+            1. 如果属性是参数(_parameters字典中的键)，则删除该参数
+            2. 如果属性是缓冲区(_buffers字典中的键)，则删除该缓冲区
+            同时从_non_persistent_buffers_set中移除该名称(如果是非持久化缓冲区)
+            3. 如果属性是子模块(_modules字典中的键)，则删除该子模块
+            4. 如果都不是以上情况，则调用父类的__delattr__方法
+        """
         if name in self._parameters:
-            del self._parameters[name]
+            del self._parameters[name]  # 删除参数
         elif name in self._buffers:
-            del self._buffers[name]
-            self._non_persistent_buffers_set.discard(name)
+            del self._buffers[name]  # 删除缓冲区
+            self._non_persistent_buffers_set.discard(name)  # 从非持久化缓冲区集合中移除
         elif name in self._modules:
-            del self._modules[name]
+            del self._modules[name]  # 删除子模块
         else:
-            super().__delattr__(name)
+            super().__delattr__(name)  # 调用父类方法处理其他属性
 
     def _register_state_dict_hook(self, hook):
-        r"""Register a post-hook for the :meth:`~torch.nn.Module.state_dict` method.
-
-        It should have the following signature::
-            hook(module, state_dict, prefix, local_metadata) -> None or state_dict
-
-        The registered hooks can modify the ``state_dict`` inplace or return a new one.
-        If a new ``state_dict`` is returned, it will only be respected if it is the root
-        module that :meth:`~nn.Module.state_dict` is called from.
+        """
+        注册state_dict方法的后处理钩子函数
+        
+        参数:
+            hook: 钩子函数，需符合特定签名:
+                hook(module, state_dict, prefix, local_metadata) -> None or state_dict
+        
+        返回:
+            RemovableHandle: 可移除的钩子句柄
+        
+        抛出:
+            RuntimeError: 如果尝试重复注册相同的钩子函数
+        
+        说明:
+            1. 钩子可以原地修改state_dict或返回新的state_dict
+            2. 只有根模块返回的新state_dict会被采纳
         """
         if getattr(hook, "_from_public_api", False):
             raise RuntimeError(
                 "Cannot register the same function as the state dict post hook that was "
                 "previously registered via register_state_dict_post_hook"
             )
+        # 创建可移除的钩子句柄并注册
         handle = RemovableHandle(self._state_dict_hooks)
         self._state_dict_hooks[handle.id] = hook
         return handle
