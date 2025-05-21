@@ -18,37 +18,44 @@ from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 from torch.utils.hooks import BackwardHook, RemovableHandle
 
 
+# 定义模块公开接口列表（控制from module import *时暴露的内容）
 __all__ = [
-    "register_module_forward_pre_hook",
-    "register_module_forward_hook",
-    "register_module_full_backward_pre_hook",
-    "register_module_backward_hook",
-    "register_module_full_backward_hook",
-    "register_module_buffer_registration_hook",
-    "register_module_module_registration_hook",
-    "register_module_parameter_registration_hook",
-    "Module",
+    "register_module_forward_pre_hook",      # 注册前向传播预处理钩子
+    "register_module_forward_hook",          # 注册前向传播后处理钩子
+    "register_module_full_backward_pre_hook",# 注册完整反向传播预处理钩子
+    "register_module_backward_hook",         # 注册反向传播钩子(已废弃，保留兼容)
+    "register_module_full_backward_hook",    # 注册完整反向传播后处理钩子
+    "register_module_buffer_registration_hook",  # 注册buffer添加时的钩子
+    "register_module_module_registration_hook",  # 注册子模块添加时的钩子
+    "register_module_parameter_registration_hook",# 注册参数添加时的钩子
+    "Module",                               # 基础模块类
 ]
 
+# 梯度类型注解：可以是张量或张量元组
 _grad_t = Union[tuple[Tensor, ...], Tensor]
-# See https://mypy.readthedocs.io/en/latest/generics.html#generic-methods-and-generic-self for the use
-# of `T` to annotate `self`. Many methods of `Module` return `self` and we want those return values to be
-# the type of the subclass, not the looser type of `Module`.
+
+# 类型变量T，用于注解返回self的方法，确保子类方法返回正确的类型
+# 详见MyPy文档关于泛型方法的说明
 T = TypeVar("T", bound="Module")
 
 
 class _IncompatibleKeys(
     namedtuple("IncompatibleKeys", ["missing_keys", "unexpected_keys"]),
 ):
-    __slots__ = ()
+    """用于记录模型状态字典加载时的键不匹配情况"""
+    __slots__ = ()  # 禁止动态属性创建以节省内存
 
     def __repr__(self):
+        """自定义输出格式：
+        - 当没有缺失或意外键时显示成功消息
+        - 否则调用父类的元组表示法
+        """
         if not self.missing_keys and not self.unexpected_keys:
             return "<All keys matched successfully>"
         return super().__repr__()
 
+    # 使str()和repr()输出一致
     __str__ = __repr__
-
 
 def _addindent(s_, numSpaces):
     s = s_.split("\n")

@@ -1144,24 +1144,47 @@ def _get_original_state_dict(mod: torch.nn.Module) -> dict[str, Any]:
 
 
 def _process_export_inputs(mod, args, kwargs, dynamic_shapes):
+    """
+    处理模型导出时的输入参数，包括验证输入格式、处理动态形状等
+    
+    参数:
+        mod: 要导出的模型
+        args: 模型的位置参数输入
+        kwargs: 模型的关键字参数输入
+        dynamic_shapes: 动态形状配置，可以是AdditionalInputs或ShapesCollection对象
+    
+    返回:
+        tuple: 包含处理后的args, kwargs, 原始输入结构, 动态形状配置和验证函数
+    """
+    
+    # 验证args必须是tuple类型
     if not isinstance(args, tuple):
         raise UserError(
             UserErrorType.INVALID_INPUT,
             f"Expecting `args` to be a tuple of example positional inputs, got {type(args)}",
         )
+    
+    # 确保kwargs不为None，如果是None则设为空字典
     kwargs = kwargs if kwargs is not None else {}
+    
+    # 使用pytree扁平化输入参数，获取原始输入结构
     _, original_in_spec = pytree.tree_flatten((args, kwargs))
 
+    # 处理动态形状配置
     if isinstance(dynamic_shapes, torch.export.AdditionalInputs):
+        # 如果是AdditionalInputs类型，获取验证函数和动态形状配置
         verify_additional_inputs = dynamic_shapes.verify
         dynamic_shapes = dynamic_shapes.dynamic_shapes(mod, args, kwargs)
     else:
+        # 默认验证函数(空操作)
         verify_additional_inputs = lambda ep: None  # noqa: E731
+        
+        # 如果是ShapesCollection类型，获取动态形状配置
         if isinstance(dynamic_shapes, torch.export.ShapesCollection):
             dynamic_shapes = dynamic_shapes.dynamic_shapes(mod, args, kwargs)
 
+    # 返回处理后的所有参数
     return args, kwargs, original_in_spec, dynamic_shapes, verify_additional_inputs
-
 
 def _get_module_call_graph(
     export_artifact: ExportArtifact,
@@ -1170,42 +1193,54 @@ def _get_module_call_graph(
     forward_arg_names: Optional[list[str]] = None,
 ) -> tuple[torch.fx.GraphModule, list[ModuleCallEntry]]:
     """
-    In-place modify the graph module in export_artifact, remove _export_tracepoint nodes and
-    return module_call_graph.
+    处理导出模型的计算图，移除_export_tracepoint节点并返回模块调用关系图
+    
+    参数:
+        export_artifact: 包含导出模型及其元数据的结构体
+        preserve_module_call_signature: 需要保留调用签名的模块路径元组
+        strict_mode_export: 是否启用严格导出模式
+        forward_arg_names: 顶层模块的前向传播参数名列表(可选)
+    
+    返回:
+        tuple: 包含处理后的图模块(fx.GraphModule)和模块调用关系图(ModuleCallEntry列表)
     """
-    gm: torch.fx.GraphModule = export_artifact.aten.gm
-    export_graph_signature: ExportGraphSignature = export_artifact.aten.sig
-    module_call_specs: dict[
-        str, dict[str, TreeSpec]
-    ] = export_artifact.module_call_specs
-    in_spec: TreeSpec = export_artifact.in_spec
-    out_spec: TreeSpec = export_artifact.out_spec
+    
+    # 从导出结果中提取关键组件
+    gm: torch.fx.GraphModule = export_artifact.aten.gm  # FX图模块
+    export_graph_signature: ExportGraphSignature = export_artifact.aten.sig  # 图签名信息
+    module_call_specs: dict[str, dict[str, TreeSpec]] = export_artifact.module_call_specs  # 模块调用规范
+    in_spec: TreeSpec = export_artifact.in_spec  # 输入结构规范
+    out_spec: TreeSpec = export_artifact.out_spec  # 输出结构规范
 
-    # Make module signatures.
+    # 构建模块调用签名字典
     module_call_signatures: dict[str, ModuleCallSignature] = {}
     for fqn, specs in module_call_specs.items():
+        # 根据是否严格模式处理模块路径
         mod_fqn = _strip_root(fqn) if not strict_mode_export else fqn
         module_call_signatures[mod_fqn] = ModuleCallSignature(
             inputs=[],
             outputs=[],
-            in_spec=specs["in_spec"],
-            out_spec=specs["out_spec"],
-            forward_arg_names=None,  # we only propage forward_arg_names for the top level module
+            in_spec=specs["in_spec"],  # 模块输入结构
+            out_spec=specs["out_spec"],  # 模块输出结构
+            forward_arg_names=None,  # 仅顶层模块需要传播forward_arg_names
         )
 
+    # 处理需要保留调用签名的模块
     if len(preserve_module_call_signature) > 0:
         if not strict_mode_export:
-            _rewrite_tracepoint_node(gm)
+            _rewrite_tracepoint_node(gm)  # 非严格模式下重写tracepoint节点
+        # 执行收集tracepoint的pass
         res = CollectTracepointsPass(module_call_signatures, export_graph_signature)(gm)
         assert res is not None
         gm = res.graph_module
 
+    # 生成最终的模块调用关系图
     assert _EXPORT_MODULE_HIERARCHY is not None
     module_call_graph = _make_module_call_graph(
-        in_spec,
-        out_spec,
-        module_call_signatures,
-        forward_arg_names,
+        in_spec,  # 全局输入结构
+        out_spec,  # 全局输出结构
+        module_call_signatures,  # 各模块签名
+        forward_arg_names,  # 前向传播参数名
     )
     return gm, module_call_graph
 
