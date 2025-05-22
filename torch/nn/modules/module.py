@@ -2055,61 +2055,65 @@ def __init__(self, *args, **kwargs) -> None:
     def register_state_dict_post_hook(self, hook):
         r"""Register a post-hook for the :meth:`~torch.nn.Module.state_dict` method.
 
-        It should have the following signature::
+        为 :meth:`~torch.nn.Module.state_dict` 方法注册一个后钩子。
+
+        钩子应有如下签名::
             hook(module, state_dict, prefix, local_metadata) -> None
 
-        The registered hooks can modify the ``state_dict`` inplace.
+        注册的钩子可以原地修改 ``state_dict``。
         """
-        # In _register_state_dict_hook there was a bug described in
-        # https://github.com/pytorch/pytorch/issues/117437 where the return value
-        # was only respected for the root module but not child submodules.
-        # We fix this in this public version by only allowing inplace modifications on
-        # the state_dict by the hook. However, since hooks registered via both these
-        # APIs will be added to `_state_dict_hooks` and the type of `_state_dict_hooks`
-        # cannot be changed due to many dependencies on it, we mark a hook
-        # as being registered via the public API by setting `_from_public_api` on it.
-        # In the implementation of `state_dict`, if the callable does not have this
-        # flag, the old behavior of respecting the return value will be preserved
-        # for the root module, otherwise, we ensure that the hook returns None.
-        hook._from_public_api = True
-        handle = RemovableHandle(self._state_dict_hooks)
-        self._state_dict_hooks[handle.id] = hook
-        return handle
+        # 在 _register_state_dict_hook 中存在一个 bug，描述于
+        # https://github.com/pytorch/pytorch/issues/117437 
+        # 该 bug 导致只有根模块会尊重返回值，而子模块不会。
+        # 在这个公开版本中我们通过只允许钩子原地修改 state_dict 来修复这个问题。
+        # 但是由于通过这两个 API 注册的钩子都会被添加到 `_state_dict_hooks` 中，
+        # 且 `_state_dict_hooks` 的类型由于许多依赖而不能更改，
+        # 我们通过在钩子上设置 `_from_public_api` 来标记它是通过公开 API 注册的。
+        # 在 `state_dict` 的实现中，如果可调用对象没有这个标志，
+        # 对于根模块将保留尊重返回值的旧行为，
+        # 否则，我们确保钩子返回 None。
+        hook._from_public_api = True  # 标记该钩子是通过公开 API 注册的
+        handle = RemovableHandle(self._state_dict_hooks)  # 创建可移除的句柄
+        self._state_dict_hooks[handle.id] = hook  # 将钩子注册到模块的_state_dict_hooks中
+        return handle  # 返回句柄以便后续移除
 
     def register_state_dict_pre_hook(self, hook):
         r"""Register a pre-hook for the :meth:`~torch.nn.Module.state_dict` method.
 
-        It should have the following signature::
+        为 :meth:`~torch.nn.Module.state_dict` 方法注册一个前置钩子。
+
+        钩子应有如下签名::
             hook(module, prefix, keep_vars) -> None
 
-        The registered hooks can be used to perform pre-processing before the ``state_dict``
-        call is made.
+        注册的钩子可用于在调用 ``state_dict`` 前执行预处理。
         """
-        handle = RemovableHandle(self._state_dict_pre_hooks)
-        self._state_dict_pre_hooks[handle.id] = hook
-        return handle
+        handle = RemovableHandle(self._state_dict_pre_hooks)  # 创建可移除的句柄
+        self._state_dict_pre_hooks[handle.id] = hook  # 将钩子注册到模块的_state_dict_pre_hooks中
+        return handle  # 返回句柄以便后续移除
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         r"""Save module state to the `destination` dictionary.
 
-        The `destination` dictionary will contain the state
-        of the module, but not its descendants. This is called on every
-        submodule in :meth:`~torch.nn.Module.state_dict`.
+        将模块状态保存到 `destination` 字典中。
 
-        In rare cases, subclasses can achieve class-specific behavior by
-        overriding this method with custom logic.
+        `destination` 字典将包含该模块的状态，但不包含其子模块的状态。
+        这个方法会在 :meth:`~torch.nn.Module.state_dict` 中对每个子模块调用。
+
+        在极少数情况下，子类可以通过覆盖此方法来实现特定于类的行为。
 
         Args:
-            destination (dict): a dict where state will be stored
-            prefix (str): the prefix for parameters and buffers used in this
-                module
+            destination (dict): 用于存储状态的字典
+            prefix (str): 该模块使用的参数和缓冲区的键名前缀
         """
+        # 保存参数
         for name, param in self._parameters.items():
             if param is not None:
                 destination[prefix + name] = param if keep_vars else param.detach()
+        # 保存缓冲区
         for name, buf in self._buffers.items():
             if buf is not None and name not in self._non_persistent_buffers_set:
                 destination[prefix + name] = buf if keep_vars else buf.detach()
+        # 保存额外状态
         extra_state_key = prefix + _EXTRA_STATE_KEY_SUFFIX
         if (
             getattr(self.__class__, "get_extra_state", Module.get_extra_state)
@@ -2117,172 +2121,192 @@ def __init__(self, *args, **kwargs) -> None:
         ):
             destination[extra_state_key] = self.get_extra_state()
 
-    # The user can pass an optional arbitrary mappable object to `state_dict`, in which case `state_dict` returns
-    # back that same object. But if they pass nothing, an `OrderedDict` is created and returned.
+    # 用户可以向 `state_dict` 传递一个可选的任意可映射对象，此时 `state_dict` 会返回该对象。
+    # 如果没有传递任何对象，则会创建并返回一个 `OrderedDict`。
     T_destination = TypeVar("T_destination", bound=dict[str, Any])
 
     @overload
     def state_dict(
         self, *, destination: T_destination, prefix: str = ..., keep_vars: bool = ...
     ) -> T_destination:
+        """重载版本1：当传入destination参数时
+        
+        参数:
+            destination (T_destination): 目标字典，状态将被保存到这个字典中
+            prefix (str, 可选): 所有键名前添加的前缀，默认为...
+            keep_vars (bool, 可选): 是否保留计算图变量，默认为...
+        
+        返回:
+            T_destination: 传入的destination字典，包含模块状态
+        """
         ...
 
-    @overload
+    @overload 
     def state_dict(self, *, prefix: str = ..., keep_vars: bool = ...) -> dict[str, Any]:
+        """重载版本2：当不传入destination参数时
+        
+        参数:
+            prefix (str, 可选): 所有键名前添加的前缀，默认为... 
+            keep_vars (bool, 可选): 是否保留计算图变量，默认为...
+        
+        返回:
+            dict[str, Any]: 新创建的字典，包含模块状态
+        """
         ...
 
-    # TODO: Change `*args` to `*` and remove the corresponding warning in docs when BC allows.
-    # Also remove the logic for arg parsing together.
+    # TODO: 当不再需要向后兼容时，将`*args`改为`*`并移除文档中的警告
+    # 同时可以移除相关的参数解析逻辑
     def state_dict(self, *args, destination=None, prefix="", keep_vars=False):
-        r"""Return a dictionary containing references to the whole state of the module.
+        r"""返回包含模块完整状态的字典。
 
-        Both parameters and persistent buffers (e.g. running averages) are
-        included. Keys are corresponding parameter and buffer names.
-        Parameters and buffers set to ``None`` are not included.
+        包含所有参数和持久性缓冲区(如运行平均值)。键名对应参数和缓冲区的名称。
+        设置为``None``的参数和缓冲区不会被包含。
 
         .. note::
-            The returned object is a shallow copy. It contains references
-            to the module's parameters and buffers.
+            返回的是浅拷贝对象，包含对模块参数和缓冲区的引用。
 
         .. warning::
-            Currently ``state_dict()`` also accepts positional arguments for
-            ``destination``, ``prefix`` and ``keep_vars`` in order. However,
-            this is being deprecated and keyword arguments will be enforced in
-            future releases.
+            当前``state_dict()``仍接受位置参数(按destination、prefix、keep_vars顺序)，
+            但这已被弃用，未来版本将强制使用关键字参数。
 
         .. warning::
-            Please avoid the use of argument ``destination`` as it is not
-            designed for end-users.
+            请避免使用``destination``参数，它不是为最终用户设计的。
 
-        Args:
-            destination (dict, optional): If provided, the state of module will
-                be updated into the dict and the same object is returned.
-                Otherwise, an ``OrderedDict`` will be created and returned.
-                Default: ``None``.
-            prefix (str, optional): a prefix added to parameter and buffer
-                names to compose the keys in state_dict. Default: ``''``.
-            keep_vars (bool, optional): by default the :class:`~torch.Tensor` s
-                returned in the state dict are detached from autograd. If it's
-                set to ``True``, detaching will not be performed.
-                Default: ``False``.
+        参数:
+            destination (dict, 可选): 如果提供，模块状态将更新到此字典并返回该对象。
+                否则会创建并返回一个``OrderedDict``。默认: ``None``
+            prefix (str, 可选): 添加到参数和缓冲区名称前的前缀，用于构成state_dict中的键。
+                默认: ``''``
+            keep_vars (bool, 可选): 默认情况下state_dict中的:class:`~torch.Tensor`会从autograd分离。
+                如果设为``True``，则不会执行分离操作。默认: ``False``
 
-        Returns:
-            dict:
-                a dictionary containing a whole state of the module
+        返回:
+            dict: 包含模块完整状态的字典
 
-        Example::
-
-            >>> # xdoctest: +SKIP("undefined vars")
+        示例::
             >>> module.state_dict().keys()
             ['bias', 'weight']
 
         """
-        # TODO: Remove `args` and the parsing logic when BC allows.
+
+        # 处理向后兼容的位置参数(将被移除)
+
         if len(args) > 0:
-            # DeprecationWarning is ignored by default
+
             warnings.warn(
-                "Positional args are being deprecated, use kwargs instead. Refer to "
-                "https://pytorch.org/docs/main/generated/torch.nn.Module.html#torch.nn.Module.state_dict"
-                " for details.",
+                "位置参数已被弃用，请使用关键字参数。详情参见: "
+                "https://pytorch.org/docs/main/generated/torch.nn.Module.html#torch.nn.Module.state_dict",
                 FutureWarning,
                 stacklevel=2,
             )
             if destination is None:
-                destination = args[0]
+                destination = args[0]  # 第一个位置参数对应destination
             if len(args) > 1 and prefix == "":
-                prefix = args[1]
+                prefix = args[1]  # 第二个位置参数对应prefix
             if len(args) > 2 and keep_vars is False:
-                keep_vars = args[2]
+                keep_vars = args[2]  # 第三个位置参数对应keep_vars
 
+        # 初始化目标字典
         if destination is None:
             destination = OrderedDict()
-            destination._metadata = OrderedDict()
+            destination._metadata = OrderedDict()  # 元数据存储字典
 
+        # 准备本地元数据(包含版本信息)
         local_metadata = dict(version=self._version)
         if hasattr(destination, "_metadata"):
             destination._metadata[prefix[:-1]] = local_metadata
 
+        # 执行所有前置钩子
         for hook in self._state_dict_pre_hooks.values():
             hook(self, prefix, keep_vars)
+
+        # 保存当前模块状态
         self._save_to_state_dict(destination, prefix, keep_vars)
+
+        # 递归保存子模块状态
         for name, module in self._modules.items():
             if module is not None:
                 module.state_dict(
                     destination=destination,
-                    prefix=prefix + name + ".",
+                    prefix=prefix + name + ".",  # 子模块添加层级前缀
                     keep_vars=keep_vars,
                 )
+
+        # 执行所有后置钩子
         for hook in self._state_dict_hooks.values():
             hook_result = hook(self, destination, prefix, local_metadata)
+            # 处理钩子返回值(兼容新旧版本)
             if not getattr(hook, "_from_public_api", False):
-                if hook_result is not None:
+                if hook_result is not None:  # 旧版本行为：接受返回值
                     destination = hook_result
-            else:
+            else:  # 新版本行为：必须返回None
                 if hook_result is not None:
-                    raise RuntimeError("state_dict post-hook must return None")
+                    raise RuntimeError("state_dict后置钩子必须返回None")
+
         return destination
-
+    
     def _register_load_state_dict_pre_hook(self, hook, with_module=False):
-        r"""See :meth:`~torch.nn.Module.register_load_state_dict_pre_hook` for details.
+        r"""注册一个在加载state_dict前执行的前置钩子（内部实现）
+        
+        与 :meth:`~torch.nn.Module.register_load_state_dict_pre_hook` 的细微区别在于：
+        当 ``with_module`` 为 False 时，钩子不会将 ``module`` 作为第一个参数，
+        而公开API总是将模块作为第一个参数。
 
-        A subtle difference is that if ``with_module`` is set to ``False``, then the
-        hook will not take the ``module`` as the first argument whereas
-        :meth:`~torch.nn.Module.register_load_state_dict_pre_hook` always takes the
-        ``module`` as the first argument.
-
-        Arguments:
-            hook (Callable): Callable hook that will be invoked before
-                loading the state dict.
-            with_module (bool, optional): Whether or not to pass the module
-                instance to the hook as the first parameter.
+        参数:
+            hook (Callable): 在加载state_dict前调用的可执行钩子
+            with_module (bool, 可选): 是否将模块实例作为第一个参数传递给钩子
         """
+        # 创建可移除的句柄
         handle = RemovableHandle(self._load_state_dict_pre_hooks)
+        # 包装钩子（根据with_module决定是否传入self）
         self._load_state_dict_pre_hooks[handle.id] = _WrappedHook(
             hook, self if with_module else None
         )
-        return handle
+        return handle  # 返回可移除句柄
 
     def register_load_state_dict_pre_hook(self, hook):
-        r"""Register a pre-hook to be run before module's :meth:`~nn.Module.load_state_dict` is called.
+        r"""注册一个在模块的 :meth:`~nn.Module.load_state_dict` 调用前执行的公开前置钩子
 
-        It should have the following signature::
-            hook(module, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs) -> None  # noqa: B950
+        钩子应有如下签名::
+            hook(module, state_dict, prefix, local_metadata, strict, 
+                missing_keys, unexpected_keys, error_msgs) -> None
 
-        Arguments:
-            hook (Callable): Callable hook that will be invoked before
-                loading the state dict.
+        参数:
+            hook (Callable): 在加载state_dict前调用的可执行钩子
+
+        返回:
+            可移除的句柄对象
         """
+        # 调用内部实现，强制传入module参数
         return self._register_load_state_dict_pre_hook(hook, with_module=True)
 
     def register_load_state_dict_post_hook(self, hook):
-        r"""Register a post-hook to be run after module's :meth:`~nn.Module.load_state_dict` is called.
+        r"""注册一个在模块的 :meth:`~nn.Module.load_state_dict` 调用后执行的后置钩子
 
-        It should have the following signature::
+        钩子应有如下签名::
             hook(module, incompatible_keys) -> None
 
-        The ``module`` argument is the current module that this hook is registered
-        on, and the ``incompatible_keys`` argument is a ``NamedTuple`` consisting
-        of attributes ``missing_keys`` and ``unexpected_keys``. ``missing_keys``
-        is a ``list`` of ``str`` containing the missing keys and
-        ``unexpected_keys`` is a ``list`` of ``str`` containing the unexpected keys.
+        ``module`` 参数是注册该钩子的当前模块，
+        ``incompatible_keys`` 是一个包含以下属性的命名元组:
+            - missing_keys: 包含缺失键名的列表
+            - unexpected_keys: 包含意外键名的列表
 
-        The given incompatible_keys can be modified inplace if needed.
+        注意:
+            1. 如果需要，可以直接原地修改incompatible_keys
+            2. 当调用 :func:`load_state_dict` 时，钩子对missing_keys或unexpected_keys的修改
+            会影响strict=True时的检查行为
+            3. 如果清空missing_keys和unexpected_keys，可以避免报错
 
-        Note that the checks performed when calling :func:`load_state_dict` with
-        ``strict=True`` are affected by modifications the hook makes to
-        ``missing_keys`` or ``unexpected_keys``, as expected. Additions to either
-        set of keys will result in an error being thrown when ``strict=True``, and
-        clearing out both missing and unexpected keys will avoid an error.
-
-        Returns:
+        返回:
             :class:`torch.utils.hooks.RemovableHandle`:
-                a handle that can be used to remove the added hook by calling
-                ``handle.remove()``
+                可通过调用 ``handle.remove()`` 移除钩子的句柄
         """
+        # 创建可移除的句柄
         handle = RemovableHandle(self._load_state_dict_post_hooks)
+        # 注册钩子
         self._load_state_dict_post_hooks[handle.id] = hook
         return handle
-
+    
     def _load_from_state_dict(
         self,
         state_dict,
@@ -2293,41 +2317,29 @@ def __init__(self, *args, **kwargs) -> None:
         unexpected_keys,
         error_msgs,
     ):
-        r"""Copy parameters and buffers from :attr:`state_dict` into only this module, but not its descendants.
-
-        This is called on every submodule
-        in :meth:`~torch.nn.Module.load_state_dict`. Metadata saved for this
-        module in input :attr:`state_dict` is provided as :attr:`local_metadata`.
-        For state dicts without metadata, :attr:`local_metadata` is empty.
-        Subclasses can achieve class-specific backward compatible loading using
-        the version number at `local_metadata.get("version", None)`.
-        Additionally, :attr:`local_metadata` can also contain the key
-        `assign_to_params_buffers` that indicates whether keys should be
-        assigned their corresponding tensor in the state_dict.
+        r"""从state_dict加载参数和缓冲区到当前模块（不包含子模块）
+        
+        在:meth:`~torch.nn.Module.load_state_dict`中会对每个子模块调用此方法。
+        输入state_dict中保存的元数据通过:attr:`local_metadata`提供。
+        对于没有元数据的state_dict，:attr:`local_metadata`为空。
+        子类可以使用`local_metadata.get("version", None)`中的版本号实现特定于类的向后兼容加载。
+        此外，:attr:`local_metadata`还可以包含`assign_to_params_buffers`键，
+        指示是否应该将state_dict中的张量直接赋值给对应参数/缓冲区。
 
         .. note::
-            :attr:`state_dict` is not the same object as the input
-            :attr:`state_dict` to :meth:`~torch.nn.Module.load_state_dict`. So
-            it can be modified.
+            这里的:attr:`state_dict`与输入到:meth:`~torch.nn.Module.load_state_dict`的
+            state_dict不是同一个对象，因此可以被修改。
 
-        Args:
-            state_dict (dict): a dict containing parameters and
-                persistent buffers.
-            prefix (str): the prefix for parameters and buffers used in this
-                module
-            local_metadata (dict): a dict containing the metadata for this module.
-                See
-            strict (bool): whether to strictly enforce that the keys in
-                :attr:`state_dict` with :attr:`prefix` match the names of
-                parameters and buffers in this module
-            missing_keys (list of str): if ``strict=True``, add missing keys to
-                this list
-            unexpected_keys (list of str): if ``strict=True``, add unexpected
-                keys to this list
-            error_msgs (list of str): error messages should be added to this
-                list, and will be reported together in
-                :meth:`~torch.nn.Module.load_state_dict`
+        参数:
+            state_dict (dict): 包含参数和持久缓冲区的字典
+            prefix (str): 当前模块参数和缓冲区使用的前缀
+            local_metadata (dict): 包含当前模块元数据的字典
+            strict (bool): 是否严格检查带前缀的键名与模块参数/缓冲区名称匹配
+            missing_keys (list): strict=True时，将缺失的键添加到此列表
+            unexpected_keys (list): strict=True时，将意外的键添加到此列表
+            error_msgs (list): 错误信息应添加到此列表，会在load_state_dict中统一报告
         """
+        # 执行所有加载前的预处理钩子
         for hook in self._load_state_dict_pre_hooks.values():
             hook(
                 state_dict,
@@ -2339,35 +2351,43 @@ def __init__(self, *args, **kwargs) -> None:
                 error_msgs,
             )
 
+        # 获取持久性缓冲区(排除非持久性缓冲区)
         persistent_buffers = {
             k: v
             for k, v in self._buffers.items()
             if k not in self._non_persistent_buffers_set
         }
+        # 合并参数和持久性缓冲区
         local_name_params = itertools.chain(
             self._parameters.items(), persistent_buffers.items()
         )
+        # 过滤掉None值，得到本地状态
         local_state = {k: v for k, v in local_name_params if v is not None}
+        
+        # 检查是否应该直接赋值而不是复制
         assign_to_params_buffers = local_metadata.get("assign_to_params_buffers", False)
+        # 检查是否启用张量交换功能
         use_swap_tensors = torch.__future__.get_swap_module_params_on_conversion()
 
+        # 遍历本地状态中的每个参数/缓冲区
         for name, param in local_state.items():
-            key = prefix + name
-            if key in state_dict:
+            key = prefix + name  # 构造完整键名
+            
+            if key in state_dict:  # 如果state_dict中存在该键
                 input_param = state_dict[key]
+                
+                # 类型检查：必须是张量或类似张量的对象
                 if not torch.overrides.is_tensor_like(input_param):
                     error_msgs.append(
-                        f'While copying the parameter named "{key}", '
-                        "expected torch.Tensor or Tensor-like object from checkpoint but "
-                        f"received {type(input_param)}"
+                        f'加载参数"{key}"时，期望得到torch.Tensor或类似对象，'
+                        f"但得到的是{type(input_param)}"
                     )
                     continue
 
-                # This is used to avoid copying uninitialized parameters into
-                # non-lazy modules, since they dont have the hook to do the checks
-                # in such case, it will error when accessing the .shape attribute.
+                # 检查是否为延迟初始化参数
                 is_param_lazy = torch.nn.parameter.is_lazy(param)
-                # Backward compatibility: loading 1-dim tensor from 0.3.* to version 0.4+
+                
+                # 向后兼容处理：从0.3.*版本加载1维张量到0.4+版本
                 if (
                     not is_param_lazy
                     and len(param.shape) == 0
@@ -2375,39 +2395,41 @@ def __init__(self, *args, **kwargs) -> None:
                 ):
                     input_param = input_param[0]
 
+                # 形状检查（非延迟参数）
                 if not is_param_lazy and input_param.shape != param.shape:
-                    # local shape should match the one in checkpoint
                     error_msgs.append(
-                        f"size mismatch for {key}: copying a param with shape {input_param.shape} from checkpoint, "
-                        f"the shape in current model is {param.shape}."
+                        f"参数{key}形状不匹配：检查点中的形状为{input_param.shape}，"
+                        f"当前模型中的形状为{param.shape}。"
                     )
                     continue
 
+                # 元参数检查
                 if (
                     param.is_meta
                     and not input_param.is_meta
                     and not assign_to_params_buffers
                 ):
                     warnings.warn(
-                        f"for {key}: copying from a non-meta parameter in the checkpoint to a meta "
-                        "parameter in the current model, which is a no-op. (Did you mean to "
-                        "pass `assign=True` to assign items in the state dictionary to their "
-                        "corresponding key in the module instead of copying them in place?)"
+                        f"参数{key}：从检查点中的非元参数复制到当前模型的元参数，"
+                        "这是一个无操作。(是否想使用`assign=True`直接将状态字典中的项"
+                        "赋值给模块中的对应键而不是原地复制？)"
                     )
 
                 try:
-                    with torch.no_grad():
-                        if use_swap_tensors:
+                    with torch.no_grad():  # 禁用梯度计算
+                        if use_swap_tensors:  # 使用张量交换功能
                             new_input_param = param.module_load(
                                 input_param, assign=assign_to_params_buffers
                             )
+                            # 安全检查：不能返回输入或原始参数
                             if id(new_input_param) == id(input_param) or id(
                                 new_input_param
                             ) == id(param):
                                 raise RuntimeError(
-                                    "module_load returned one of self or other, please .detach() "
-                                    "the result if returning one of the inputs in module_load"
+                                    "module_load返回了输入或自身，如果返回输入之一"
+                                    "请在module_load中对结果调用.detach()"
                                 )
+                            # 参数类型处理
                             if isinstance(param, torch.nn.Parameter):
                                 if not isinstance(new_input_param, torch.nn.Parameter):
                                     new_input_param = torch.nn.Parameter(
@@ -2416,10 +2438,11 @@ def __init__(self, *args, **kwargs) -> None:
                                     )
                                 else:
                                     new_input_param.requires_grad_(param.requires_grad)
+                            # 执行张量交换
                             torch.utils.swap_tensors(param, new_input_param)
                             del new_input_param
-                        elif assign_to_params_buffers:
-                            # Shape checks are already done above
+                        elif assign_to_params_buffers:  # 直接赋值模式
+                            # 形状检查已在上面完成
                             if isinstance(param, torch.nn.Parameter):
                                 if not isinstance(input_param, torch.nn.Parameter):
                                     input_param = torch.nn.Parameter(
@@ -2427,20 +2450,21 @@ def __init__(self, *args, **kwargs) -> None:
                                     )
                                 else:
                                     input_param.requires_grad_(param.requires_grad)
-                            setattr(self, name, input_param)
-                        else:
+                            setattr(self, name, input_param)  # 直接设置属性
+                        else:  # 默认模式：原地复制
                             param.copy_(input_param)
                 except Exception as ex:
-                    action = "swapping" if use_swap_tensors else "copying"
+                    action = "交换" if use_swap_tensors else "复制"
                     error_msgs.append(
-                        f'While {action} the parameter named "{key}", '
-                        f"whose dimensions in the model are {param.size()} and "
-                        f"whose dimensions in the checkpoint are {input_param.size()}, "
-                        f"an exception occurred : {ex.args}."
+                        f'当{action}参数"{key}"时发生异常，'
+                        f"模型中的维度为{param.size()}，"
+                        f"检查点中的维度为{input_param.size()}，"
+                        f"异常信息: {ex.args}。"
                     )
-            elif strict:
+            elif strict:  # strict模式下记录缺失键
                 missing_keys.append(key)
 
+        # 处理额外状态
         extra_state_key = prefix + _EXTRA_STATE_KEY_SUFFIX
         if (
             getattr(self.__class__, "set_extra_state", Module.set_extra_state)
@@ -2453,76 +2477,74 @@ def __init__(self, *args, **kwargs) -> None:
         elif strict and (extra_state_key in state_dict):
             unexpected_keys.append(extra_state_key)
 
+        # strict模式下检查意外键
         if strict:
             for key in state_dict.keys():
                 if key.startswith(prefix) and key != extra_state_key:
                     input_name = key[len(prefix) :].split(".", 1)
-                    # Must be Module if it have attributes
+                    # 如果有属性分隔符，必须是模块
                     if len(input_name) > 1:
                         if input_name[0] not in self._modules:
                             unexpected_keys.append(key)
                     elif input_name[0] not in local_state:
                         unexpected_keys.append(key)
-
+                        
     def load_state_dict(
-        self, state_dict: Mapping[str, Any], strict: bool = True, assign: bool = False
+        self, 
+        state_dict: Mapping[str, Any], 
+        strict: bool = True, 
+        assign: bool = False
     ):
-        r"""Copy parameters and buffers from :attr:`state_dict` into this module and its descendants.
-
-        If :attr:`strict` is ``True``, then
-        the keys of :attr:`state_dict` must exactly match the keys returned
-        by this module's :meth:`~torch.nn.Module.state_dict` function.
+        r"""从state_dict复制参数和缓冲区到当前模块及其子模块
+        
+        如果:attr:`strict`为``True``，则state_dict的键必须严格匹配
+        本模块的:meth:`~torch.nn.Module.state_dict`方法返回的键。
 
         .. warning::
-            If :attr:`assign` is ``True`` the optimizer must be created after
-            the call to :attr:`load_state_dict` unless
-            :func:`~torch.__future__.get_swap_module_params_on_conversion` is ``True``.
+            如果:attr:`assign`设为``True``，必须在调用:attr:`load_state_dict`之后
+            创建优化器，除非:func:`~torch.__future__.get_swap_module_params_on_conversion`为``True``。
 
-        Args:
-            state_dict (dict): a dict containing parameters and
-                persistent buffers.
-            strict (bool, optional): whether to strictly enforce that the keys
-                in :attr:`state_dict` match the keys returned by this module's
-                :meth:`~torch.nn.Module.state_dict` function. Default: ``True``
-            assign (bool, optional): When set to ``False``, the properties of the tensors
-                in the current module are preserved whereas setting it to ``True`` preserves
-                properties of the Tensors in the state dict. The only
-                exception is the ``requires_grad`` field of :class:`~torch.nn.Parameter`s
-                for which the value from the module is preserved.
-                Default: ``False``
+        参数:
+            state_dict (dict): 包含参数和持久缓冲区的字典
+            strict (bool, 可选): 是否严格检查state_dict的键与模块state_dict()返回的键匹配。
+                默认: ``True``
+            assign (bool, 可选): 设为``False``时保留当前模块张量的属性；
+                设为``True``时保留state_dict中张量的属性。唯一的例外是
+                :class:`~torch.nn.Parameter`的``requires_grad``字段会保留模块中的值。
+                默认: ``False``
 
-        Returns:
-            ``NamedTuple`` with ``missing_keys`` and ``unexpected_keys`` fields:
-                * **missing_keys** is a list of str containing any keys that are expected
-                    by this module but missing from the provided ``state_dict``.
-                * **unexpected_keys** is a list of str containing the keys that are not
-                    expected by this module but present in the provided ``state_dict``.
+        返回:
+            包含``missing_keys``和``unexpected_keys``字段的命名元组:
+                * **missing_keys** - 本模块期望但state_dict中缺失的键列表(str)
+                * **unexpected_keys** - state_dict中存在但本模块不期望的键列表(str)
 
-        Note:
-            If a parameter or buffer is registered as ``None`` and its corresponding key
-            exists in :attr:`state_dict`, :meth:`load_state_dict` will raise a
-            ``RuntimeError``.
+        注意:
+            如果参数或缓冲区注册为``None``但其键存在于state_dict中，
+            :meth:`load_state_dict`会抛出``RuntimeError``。
         """
+        # 1. 输入类型检查
         if not isinstance(state_dict, Mapping):
-            raise TypeError(
-                f"Expected state_dict to be dict-like, got {type(state_dict)}."
-            )
+            raise TypeError(f"期望state_dict为字典类型，实际得到{type(state_dict)}")
 
+        # 2. 初始化结果收集列表
         missing_keys: list[str] = []
         unexpected_keys: list[str] = []
         error_msgs: list[str] = []
 
-        # copy state_dict so _load_from_state_dict can modify it
+        # 3. 复制state_dict以便修改
         metadata = getattr(state_dict, "_metadata", None)
         state_dict = OrderedDict(state_dict)
         if metadata is not None:
-            # mypy isn't aware that "_metadata" exists in state_dict
             state_dict._metadata = metadata  # type: ignore[attr-defined]
 
+        # 4. 定义嵌套加载函数
         def load(module, local_state_dict, prefix=""):
+            # 4.1 获取当前模块的元数据
             local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
             if assign:
                 local_metadata["assign_to_params_buffers"] = assign
+            
+            # 4.2 调用内部加载方法
             module._load_from_state_dict(
                 local_state_dict,
                 prefix,
@@ -2532,6 +2554,8 @@ def __init__(self, *args, **kwargs) -> None:
                 unexpected_keys,
                 error_msgs,
             )
+            
+            # 4.3 递归加载子模块
             for name, child in module._modules.items():
                 if child is not None:
                     child_prefix = prefix + name + "."
@@ -2540,114 +2564,135 @@ def __init__(self, *args, **kwargs) -> None:
                         for k, v in local_state_dict.items()
                         if k.startswith(child_prefix)
                     }
-                    load(child, child_state_dict, child_prefix)  # noqa: F821
+                    load(child, child_state_dict, child_prefix)
 
-            # Note that the hook can modify missing_keys and unexpected_keys.
+            # 4.4 执行后处理钩子
             incompatible_keys = _IncompatibleKeys(missing_keys, unexpected_keys)
             for hook in module._load_state_dict_post_hooks.values():
                 out = hook(module, incompatible_keys)
                 assert out is None, (
-                    "Hooks registered with ``register_load_state_dict_post_hook`` are not"
-                    "expected to return new values, if incompatible_keys need to be modified,"
-                    "it should be done inplace."
+                    "使用``register_load_state_dict_post_hook``注册的钩子不应返回值，"
+                    "如需修改incompatible_keys应原地操作"
                 )
 
+        # 5. 执行加载过程
         load(self, state_dict)
-        del load
+        del load  # 删除临时函数
 
+        # 6. strict模式下的错误处理
         if strict:
             if len(unexpected_keys) > 0:
                 error_msgs.insert(
                     0,
-                    "Unexpected key(s) in state_dict: {}. ".format(
+                    "state_dict中的意外键: {}。".format(
                         ", ".join(f'"{k}"' for k in unexpected_keys)
                     ),
                 )
             if len(missing_keys) > 0:
                 error_msgs.insert(
                     0,
-                    "Missing key(s) in state_dict: {}. ".format(
+                    "state_dict中缺失的键: {}。".format(
                         ", ".join(f'"{k}"' for k in missing_keys)
                     ),
                 )
 
+        # 7. 如果有错误则抛出异常
         if len(error_msgs) > 0:
             raise RuntimeError(
-                "Error(s) in loading state_dict for {}:\n\t{}".format(
+                "加载{}的state_dict时出错:\n\t{}".format(
                     self.__class__.__name__, "\n\t".join(error_msgs)
                 )
             )
+        
+        # 8. 返回不匹配的键信息
         return _IncompatibleKeys(missing_keys, unexpected_keys)
 
     def _named_members(
-        self, get_members_fn, prefix="", recurse=True, remove_duplicate: bool = True
+        self, 
+        get_members_fn, 
+        prefix="", 
+        recurse=True, 
+        remove_duplicate: bool = True
     ):
-        r"""Help yield various names + members of modules."""
-        memo = set()
+        r"""生成模块的各种名称+成员的帮助函数。
+        
+        这是一个通用生成器，用于支持parameters()/named_parameters()等方法的实现。
+
+        参数:
+            get_members_fn (Callable): 获取模块成员的方法 (如_parameters.items())
+            prefix (str): 名称前缀。默认: ""
+            recurse (bool): 是否递归处理子模块。默认: True
+            remove_duplicate (bool): 是否移除重复成员。默认: True
+
+        生成:
+            (name, member): 包含名称和成员的元组
+        """
+        memo = set()  # 用于记录已访问过的成员(去重)
+        # 获取要处理的模块列表(递归或仅当前模块)
         modules = (
             self.named_modules(prefix=prefix, remove_duplicate=remove_duplicate)
             if recurse
             else [(prefix, self)]
         )
+        
         for module_prefix, module in modules:
-            members = get_members_fn(module)
+            members = get_members_fn(module)  # 获取当前模块的成员
             for k, v in members:
-                if v is None or v in memo:
+                if v is None or v in memo:  # 跳过None和已访问成员
                     continue
                 if remove_duplicate:
-                    memo.add(v)
+                    memo.add(v)  # 记录已访问成员
+                # 生成完整名称(包含模块层级)
                 name = module_prefix + ("." if module_prefix else "") + k
                 yield name, v
 
     def parameters(self, recurse: bool = True) -> Iterator[Parameter]:
-        r"""Return an iterator over module parameters.
+        r"""返回模块参数的迭代器。
+        
+        通常传递给优化器使用。
 
-        This is typically passed to an optimizer.
+        参数:
+            recurse (bool): 如果为True，则包含本模块和所有子模块的参数；
+                        否则仅包含本模块的直接参数成员。
 
-        Args:
-            recurse (bool): if True, then yields parameters of this module
-                and all submodules. Otherwise, yields only parameters that
-                are direct members of this module.
+        生成:
+            Parameter: 模块参数
 
-        Yields:
-            Parameter: module parameter
-
-        Example::
-
-            >>> # xdoctest: +SKIP("undefined vars")
+        示例::
             >>> for param in model.parameters():
             >>>     print(type(param), param.size())
             <class 'torch.Tensor'> (20L,)
             <class 'torch.Tensor'> (20L, 1L, 5L, 5L)
-
         """
+        # 通过named_parameters获取参数，忽略名称只返回参数
         for _name, param in self.named_parameters(recurse=recurse):
             yield param
 
     def named_parameters(
-        self, prefix: str = "", recurse: bool = True, remove_duplicate: bool = True
+        self, 
+        prefix: str = "", 
+        recurse: bool = True, 
+        remove_duplicate: bool = True
     ) -> Iterator[tuple[str, Parameter]]:
-        r"""Return an iterator over module parameters, yielding both the name of the parameter as well as the parameter itself.
+        r"""返回模块参数的迭代器，同时生成参数名称和参数本身。
 
-        Args:
-            prefix (str): prefix to prepend to all parameter names.
-            recurse (bool): if True, then yields parameters of this module
-                and all submodules. Otherwise, yields only parameters that
-                are direct members of this module.
-            remove_duplicate (bool, optional): whether to remove the duplicated
-                parameters in the result. Defaults to True.
+        参数:
+            prefix (str): 添加到所有参数名称前的前缀。
+            recurse (bool): 如果为True，则包含本模块和所有子模块的参数；
+                        否则仅包含本模块的直接参数成员。
+            remove_duplicate (bool): 是否移除结果中的重复参数。默认: True
 
-        Yields:
-            (str, Parameter): Tuple containing the name and parameter
+        生成:
+            (str, Parameter): 包含名称和参数的元组
 
-        Example::
-
-            >>> # xdoctest: +SKIP("undefined vars")
+        示例::
             >>> for name, param in self.named_parameters():
             >>>     if name in ['bias']:
             >>>         print(param.size())
 
         """
+
+        # 使用_named_members生成器，传入_parameters.items()获取参数
         gen = self._named_members(
             lambda module: module._parameters.items(),
             prefix=prefix,
@@ -2680,28 +2725,28 @@ def __init__(self, *args, **kwargs) -> None:
             yield buf
 
     def named_buffers(
-        self, prefix: str = "", recurse: bool = True, remove_duplicate: bool = True
+        self, 
+        prefix: str = "", 
+        recurse: bool = True, 
+        remove_duplicate: bool = True
     ) -> Iterator[tuple[str, Tensor]]:
-        r"""Return an iterator over module buffers, yielding both the name of the buffer as well as the buffer itself.
+        r"""返回模块缓冲区的迭代器，同时生成缓冲区名称和缓冲区本身。
 
-        Args:
-            prefix (str): prefix to prepend to all buffer names.
-            recurse (bool, optional): if True, then yields buffers of this module
-                and all submodules. Otherwise, yields only buffers that
-                are direct members of this module. Defaults to True.
-            remove_duplicate (bool, optional): whether to remove the duplicated buffers in the result. Defaults to True.
+        参数:
+            prefix (str): 添加到所有缓冲区名称前的前缀
+            recurse (bool): 如果为True，则包含本模块和所有子模块的缓冲区；
+                        否则仅包含本模块的直接缓冲区成员。默认: True
+            remove_duplicate (bool): 是否移除结果中的重复缓冲区。默认: True
 
-        Yields:
-            (str, torch.Tensor): Tuple containing the name and buffer
+        生成:
+            (str, torch.Tensor): 包含名称和缓冲区的元组
 
-        Example::
-
-            >>> # xdoctest: +SKIP("undefined vars")
+        示例::
             >>> for name, buf in self.named_buffers():
             >>>     if name in ['running_var']:
             >>>         print(buf.size())
-
         """
+        # 使用_named_members基础方法，传入_buffers.items()获取缓冲区
         gen = self._named_members(
             lambda module: module._buffers.items(),
             prefix=prefix,
@@ -2711,58 +2756,48 @@ def __init__(self, *args, **kwargs) -> None:
         yield from gen
 
     def children(self) -> Iterator["Module"]:
-        r"""Return an iterator over immediate children modules.
+        r"""返回直接子模块的迭代器。
 
-        Yields:
-            Module: a child module
+        生成:
+            Module: 子模块
         """
+        # 通过named_children获取子模块，忽略名称
         for _name, module in self.named_children():
             yield module
 
     def named_children(self) -> Iterator[tuple[str, "Module"]]:
-        r"""Return an iterator over immediate children modules, yielding both the name of the module as well as the module itself.
+        r"""返回直接子模块的迭代器，同时生成模块名称和模块本身。
 
-        Yields:
-            (str, Module): Tuple containing a name and child module
+        生成:
+            (str, Module): 包含名称和子模块的元组
 
-        Example::
-
-            >>> # xdoctest: +SKIP("undefined vars")
+        示例::
             >>> for name, module in model.named_children():
             >>>     if name in ['conv4', 'conv5']:
             >>>         print(module)
-
         """
-        memo = set()
+        memo = set()  # 用于去重的集合
         for name, module in self._modules.items():
             if module is not None and module not in memo:
                 memo.add(module)
                 yield name, module
 
     def modules(self) -> Iterator["Module"]:
-        r"""Return an iterator over all modules in the network.
+        r"""返回网络中所有模块的迭代器。
 
-        Yields:
-            Module: a module in the network
+        生成:
+            Module: 网络中的模块
 
-        Note:
-            Duplicate modules are returned only once. In the following
-            example, ``l`` will be returned only once.
+        注意:
+            重复模块只会返回一次。在下例中，``l`` 只会返回一次。
 
-        Example::
-
+        示例::
             >>> l = nn.Linear(2, 2)
             >>> net = nn.Sequential(l, l)
             >>> for idx, m in enumerate(net.modules()):
             ...     print(idx, '->', m)
-
-            0 -> Sequential(
-              (0): Linear(in_features=2, out_features=2, bias=True)
-              (1): Linear(in_features=2, out_features=2, bias=True)
-            )
-            1 -> Linear(in_features=2, out_features=2, bias=True)
-
         """
+        # 通过named_modules获取模块，忽略名称
         for _, module in self.named_modules():
             yield module
 
@@ -2772,214 +2807,169 @@ def __init__(self, *args, **kwargs) -> None:
         prefix: str = "",
         remove_duplicate: bool = True,
     ):
-        r"""Return an iterator over all modules in the network, yielding both the name of the module as well as the module itself.
+        r"""返回网络中所有模块的迭代器，同时生成模块名称和模块本身。
 
-        Args:
-            memo: a memo to store the set of modules already added to the result
-            prefix: a prefix that will be added to the name of the module
-            remove_duplicate: whether to remove the duplicated module instances in the result
-                or not
+        参数:
+            memo: 存储已添加模块的集合
+            prefix: 添加到模块名称前的前缀
+            remove_duplicate: 是否移除结果中的重复模块实例
 
-        Yields:
-            (str, Module): Tuple of name and module
+        生成:
+            (str, Module): 名称和模块的元组
 
-        Note:
-            Duplicate modules are returned only once. In the following
-            example, ``l`` will be returned only once.
-
-        Example::
-
-            >>> l = nn.Linear(2, 2)
-            >>> net = nn.Sequential(l, l)
-            >>> for idx, m in enumerate(net.named_modules()):
-            ...     print(idx, '->', m)
-
-            0 -> ('', Sequential(
-              (0): Linear(in_features=2, out_features=2, bias=True)
-              (1): Linear(in_features=2, out_features=2, bias=True)
-            ))
-            1 -> ('0', Linear(in_features=2, out_features=2, bias=True))
-
+        注意:
+            重复模块只会返回一次。在下例中，``l`` 只会返回一次。
         """
         if memo is None:
             memo = set()
         if self not in memo:
             if remove_duplicate:
                 memo.add(self)
-            yield prefix, self
+            yield prefix, self  # 先返回当前模块
+            # 递归处理子模块
             for name, module in self._modules.items():
                 if module is None:
                     continue
                 submodule_prefix = prefix + ("." if prefix else "") + name
-                yield from module.named_modules(
-                    memo, submodule_prefix, remove_duplicate
-                )
+                yield from module.named_modules(memo, submodule_prefix, remove_duplicate)
 
     def train(self: T, mode: bool = True) -> T:
-        r"""Set the module in training mode.
+        r"""设置模块为训练模式。
 
-        This has an effect only on certain modules. See the documentation of
-        particular modules for details of their behaviors in training/evaluation
-        mode, i.e., whether they are affected, e.g. :class:`Dropout`, :class:`BatchNorm`,
-        etc.
+        仅对特定模块有效。参见各模块文档了解它们在训练/评估模式下的行为差异，
+        如:class:`Dropout`, :class:`BatchNorm`等。
 
-        Args:
-            mode (bool): whether to set training mode (``True``) or evaluation
-                         mode (``False``). Default: ``True``.
+        参数:
+            mode (bool): 是否设置为训练模式(True)或评估模式(False)。默认: True
 
-        Returns:
+        返回:
             Module: self
         """
         if not isinstance(mode, bool):
-            raise ValueError("training mode is expected to be boolean")
+            raise ValueError("训练模式应为布尔值")
         self.training = mode
+        # 递归设置子模块
         for module in self.children():
             module.train(mode)
         return self
 
     def eval(self: T) -> T:
-        r"""Set the module in evaluation mode.
+        r"""设置模块为评估模式。
 
-        This has an effect only on certain modules. See the documentation of
-        particular modules for details of their behaviors in training/evaluation
-        mode, i.e. whether they are affected, e.g. :class:`Dropout`, :class:`BatchNorm`,
-        etc.
+        等价于 self.train(False)。
 
-        This is equivalent with :meth:`self.train(False) <torch.nn.Module.train>`.
-
-        See :ref:`locally-disable-grad-doc` for a comparison between
-        `.eval()` and several similar mechanisms that may be confused with it.
-
-        Returns:
+        返回:
             Module: self
         """
         return self.train(False)
 
     def requires_grad_(self: T, requires_grad: bool = True) -> T:
-        r"""Change if autograd should record operations on parameters in this module.
+        r"""设置是否记录本模块参数的自动求导操作。
 
-        This method sets the parameters' :attr:`requires_grad` attributes
-        in-place.
+        用于冻结部分模块或单独训练模型部分组件(如GAN训练)。
 
-        This method is helpful for freezing part of the module for finetuning
-        or training parts of a model individually (e.g., GAN training).
+        参数:
+            requires_grad (bool): 是否记录本模块参数的操作。默认: True
 
-        See :ref:`locally-disable-grad-doc` for a comparison between
-        `.requires_grad_()` and several similar mechanisms that may be confused with it.
-
-        Args:
-            requires_grad (bool): whether autograd should record operations on
-                                  parameters in this module. Default: ``True``.
-
-        Returns:
+        返回:
             Module: self
         """
+        # 递归设置所有参数的requires_grad属性
         for p in self.parameters():
             p.requires_grad_(requires_grad)
         return self
 
     def zero_grad(self, set_to_none: bool = True) -> None:
-        r"""Reset gradients of all model parameters.
+        r"""重置所有模型参数的梯度。
 
-        See similar function under :class:`torch.optim.Optimizer` for more context.
-
-        Args:
-            set_to_none (bool): instead of setting to zero, set the grads to None.
-                See :meth:`torch.optim.Optimizer.zero_grad` for details.
+        参数:
+            set_to_none: 将梯度设为None而非零。可减少内存占用。
         """
         if getattr(self, "_is_replica", False):
             warnings.warn(
-                "Calling .zero_grad() from a module created with nn.DataParallel() has no effect. "
-                "The parameters are copied (in a differentiable manner) from the original module. "
-                "This means they are not leaf nodes in autograd and so don't accumulate gradients. "
-                "If you need gradients in your forward method, consider using autograd.grad instead."
+                "对通过nn.DataParallel()创建的模块调用.zero_grad()无效..."
             )
 
         for p in self.parameters():
             if p.grad is not None:
                 if set_to_none:
-                    p.grad = None
+                    p.grad = None  # 释放内存
                 else:
                     if p.grad.grad_fn is not None:
-                        p.grad.detach_()
+                        p.grad.detach_()  # 分离计算图
                     else:
                         p.grad.requires_grad_(False)
-                    p.grad.zero_()
+                    p.grad.zero_()  # 清零梯度
 
     def share_memory(self: T) -> T:
-        r"""See :meth:`torch.Tensor.share_memory_`."""
+        r"""共享参数和缓冲区的内存。"""
         return self._apply(lambda t: t.share_memory_())
 
     def _get_name(self):
+        """获取模块类名。"""
         return self.__class__.__name__
 
     def extra_repr(self) -> str:
-        r"""Return the extra representation of the module.
-
-        To print customized extra information, you should re-implement
-        this method in your own modules. Both single-line and multi-line
-        strings are acceptable.
+        r"""返回模块的额外描述信息。
+        
+        子类可重写此方法返回自定义信息。
         """
         return ""
 
     def __repr__(self):
-        # We treat the extra repr like the sub-module, one item per line
+        """生成模块的字符串表示。"""
         extra_lines = []
         extra_repr = self.extra_repr()
-        # empty string will be split into list ['']
         if extra_repr:
             extra_lines = extra_repr.split("\n")
+        
+        # 处理子模块表示
         child_lines = []
         for key, module in self._modules.items():
             mod_str = repr(module)
-            mod_str = _addindent(mod_str, 2)
+            mod_str = _addindent(mod_str, 2)  # 添加缩进
             child_lines.append("(" + key + "): " + mod_str)
+        
+        # 组合所有行
         lines = extra_lines + child_lines
-
         main_str = self._get_name() + "("
+        
         if lines:
-            # simple one-liner info, which most builtin Modules will use
             if len(extra_lines) == 1 and not child_lines:
-                main_str += extra_lines[0]
+                main_str += extra_lines[0]  # 单行简单表示
             else:
-                main_str += "\n  " + "\n  ".join(lines) + "\n"
-
+                main_str += "\n  " + "\n  ".join(lines) + "\n"  # 多行详细表示
+        
         main_str += ")"
         return main_str
 
     def __dir__(self):
+        """返回模块的属性列表。"""
         module_attrs = dir(self.__class__)
         attrs = list(self.__dict__.keys())
         parameters = list(self._parameters.keys())
         modules = list(self._modules.keys())
         buffers = list(self._buffers.keys())
         keys = module_attrs + attrs + parameters + modules + buffers
-
-        # Eliminate attrs that are not legal Python variable names
+        # 过滤非法Python变量名
         keys = [key for key in keys if not key[0].isdigit()]
-
         return sorted(keys)
 
     def _replicate_for_data_parallel(self):
+        """为DataParallel创建模块副本。"""
         replica = self.__new__(type(self))
         replica.__dict__ = self.__dict__.copy()
-
-        # replicas do not have parameters themselves, the replicas reference the original
-        # module.
+        # 副本不拥有实际参数，而是引用原始模块
         replica._parameters = {}
         replica._buffers = replica._buffers.copy()
         replica._modules = replica._modules.copy()
-        replica._is_replica = True  # type: ignore[assignment]
-
+        replica._is_replica = True
         return replica
 
     def compile(self, *args, **kwargs):
         """
-        Compile this Module's forward using :func:`torch.compile`.
-
-        This Module's `__call__` method is compiled and all arguments are passed as-is
-        to :func:`torch.compile`.
-
-        See :func:`torch.compile` for details on the arguments for this function.
+        使用torch.compile编译本模块的forward方法。
+        
+        所有参数直接传递给torch.compile。
         """
         self._compiled_call_impl = torch.compile(self._call_impl, *args, **kwargs)
